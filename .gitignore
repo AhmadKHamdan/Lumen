@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+
+# Whisper model cache (downloaded on first run, ~140MB)
+~/.cache/whisper/
+
+# Captured PTT audio dumps from dev/debugging
+backend/captured_audio/*
+!backend/captured_audio/.gitkeep
+
+# Frontend
+node_modules/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Local TLS certs (when we add HTTPS in Sprint 2)
+*.pem
+*.key
+*.crt

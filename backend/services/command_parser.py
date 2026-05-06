@@ -1,0 +1,291 @@
+"""
+Command parser.
+
+Bridges raw Whisper transcriptions to FSM-ready intents:
+
+    "find my cup"      ->  {"task_type": "object_allocation", "target": "cup", ...}
+    "navigate kitchen" ->  {"task_type": "navigation",        "target": "kitchen", ...}
+    "what time is it"  ->  {"task_type": "unknown",            ...}
+
+Algorithm
+---------
+We try every possible (prefix, target) split of the input. For each split we
+fuzzy-match the prefix to our list of supported templates and the target to
+our list of supported nouns. The split with the best combined score wins.
+
+This handles:
+- Multi-word targets ("dining table", "living room")
+- Mishearings ("cop" -> "cup", "fone" -> "phone", "microvave" -> "microwave")
+- Slight phrasing variation ("find a cup" via "find" -> "find my")
+- Trailing filler words ("find my cup, please" -> cup, dropping "please")
+
+Thresholds are deliberately permissive (prefix >= 70, noun >= 60). False
+positives at this layer are mostly fine because the worst case is that the
+user hears a wrong confirmation TTS and tries again.
+
+Designed to be standalone and importable - run from a Python REPL.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import string
+from typing import Optional
+
+from rapidfuzz import fuzz, process
+
+log = logging.getLogger("lumen.parser")
+
+# ---------- supported phrases ----------
+
+# Object Allocation prefixes (the "X" target follows).
+OBJECT_ALLOCATION_PREFIXES: tuple[str, ...] = (
+    "find my",
+    "find the",
+    "find a",
+    "find",
+    "where is",
+    "where's",
+    "where is my",
+    "where is the",
+    "look for",
+    "look for my",
+    "look for the",
+    "i need my",
+    "i need the",
+    "i need a",
+    "i want my",
+    "get me",
+)
+
+# Navigation prefixes.
+NAVIGATION_PREFIXES: tuple[str, ...] = (
+    "navigate to",
+    "navigate to the",
+    "take me to",
+    "take me to the",
+    "go to",
+    "go to the",
+    "lead me to",
+    "lead me to the",
+    "bring me to",
+    "guide me to",
+)
+
+# Curated COCO-class noun list of supported objects (~20 for v1). These
+# match YOLOv8 class names verbatim so Sprint 3's detection layer can use
+# them as a key directly.
+OBJECT_NOUNS: tuple[str, ...] = (
+    "cup",
+    "bottle",
+    "chair",
+    "couch",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+)
+
+# Navigation destinations (room labels - Sprint 4 will use COCO furniture
+# as proxy landmarks since COCO doesn't include rooms).
+NAVIGATION_DESTINATIONS: tuple[str, ...] = (
+    "kitchen",
+    "bathroom",
+    "bedroom",
+    "living room",
+    "dining room",
+    "office",
+    "hallway",
+    "exit",
+    "door",
+    "stairs",
+)
+
+# Synonyms / common mishearings -> canonical name. Applied before fuzzy match
+# so we don't have to widen thresholds to cover them.
+SYNONYMS: dict[str, str] = {
+    # Object aliases
+    "phone": "cell phone",
+    "cellphone": "cell phone",
+    "mobile": "cell phone",
+    "telephone": "cell phone",
+    "fone": "cell phone",
+    "television": "tv",
+    "fridge": "refrigerator",
+    "sofa": "couch",
+    "computer": "laptop",
+    "remote control": "remote",
+    "tablet": "laptop",
+    "table": "dining table",
+    # Room aliases
+    "restroom": "bathroom",
+    "washroom": "bathroom",
+    "loo": "bathroom",
+    "lounge": "living room",
+    "study": "office",
+    "way out": "exit",
+    "doorway": "door",
+    "staircase": "stairs",
+    "stairway": "stairs",
+}
+
+
+# ---------- thresholds ----------
+
+PREFIX_SCORE_THRESHOLD = 70   # how close a prefix must be to a template
+NOUN_SCORE_THRESHOLD = 60     # how close a target must be to a noun
+COMBINED_THRESHOLD = 65       # average of prefix + noun must clear this
+
+
+# ---------- main entry ----------
+
+def parse(text: str) -> dict:
+    """Parse a transcription into intent dict.
+
+    Always returns a dict with the same keys, even on failure::
+
+        {"task_type": "object_allocation", "target": "cup", "raw": "...",
+         "needs_clarification": False, "score": 95.0}
+        {"task_type": "navigation",        "target": "kitchen", ...}
+        {"task_type": "unknown",            "target": None, ...,
+         "needs_clarification": True}
+    """
+    raw = text or ""
+    norm = _normalize(raw)
+    words = norm.split()
+
+    if not words:
+        return _unknown(raw)
+
+    best: Optional[tuple[float, str, str]] = None  # (score, task_type, target)
+
+    # Try every (prefix, target) sub-window. Both endpoints are allowed to
+    # slide so we tolerate trailing filler ("please", "thanks", etc.) after
+    # the target. The search is O(N^2) but utterances are short.
+    for i in range(1, len(words)):
+        for j in range(i + 1, len(words) + 1):
+            prefix_str = " ".join(words[:i])
+            target_str = " ".join(words[i:j])
+
+            # Object allocation
+            oa = _match_prefix_and_noun(
+                prefix_str, target_str,
+                OBJECT_ALLOCATION_PREFIXES, OBJECT_NOUNS,
+            )
+            if oa is not None:
+                score, target = oa
+                if best is None or score > best[0]:
+                    best = (score, "object_allocation", target)
+
+            # Navigation
+            nav = _match_prefix_and_noun(
+                prefix_str, target_str,
+                NAVIGATION_PREFIXES, NAVIGATION_DESTINATIONS,
+            )
+            if nav is not None:
+                score, target = nav
+                if best is None or score > best[0]:
+                    best = (score, "navigation", target)
+
+    if best is not None:
+        score, task_type, target = best
+        return {
+            "task_type": task_type,
+            "target": target,
+            "raw": raw,
+            "needs_clarification": False,
+            "score": round(score, 1),
+        }
+
+    log.info("Parse: no template matched %r", raw)
+    return _unknown(raw)
+
+
+def confirmation_phrase(intent: dict) -> str:
+    """Generate the TTS confirmation string for an intent.
+
+    Examples
+    --------
+    >>> confirmation_phrase({"task_type": "object_allocation", "target": "cup"})
+    'Looking for your cup.'
+    >>> confirmation_phrase({"task_type": "navigation", "target": "kitchen"})
+    'Navigating to the kitchen.'
+    >>> confirmation_phrase({"task_type": "unknown"})
+    "I didn't catch that, please repeat."
+    """
+    ttype = intent.get("task_type")
+    target = intent.get("target") or ""
+
+    if ttype == "object_allocation":
+        return f"Looking for your {target}."
+    if ttype == "navigation":
+        return f"Navigating to the {target}."
+    return "I didn't catch that, please repeat."
+
+
+# ---------- internals ----------
+
+_PUNCT_RE = re.compile(rf"[{re.escape(string.punctuation)}]")
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace, apply synonyms."""
+    t = text.lower()
+    t = _PUNCT_RE.sub(" ", t)
+    t = " ".join(t.split())
+    # Apply synonym replacements at word boundaries.
+    for src, dst in SYNONYMS.items():
+        t = re.sub(rf"\b{re.escape(src)}\b", dst, t)
+    return t
+
+
+def _unknown(raw: str) -> dict:
+    return {
+        "task_type": "unknown",
+        "target": None,
+        "raw": raw,
+        "needs_clarification": True,
+        "score": 0.0,
+    }
+
+
+def _match_prefix_and_noun(
+    prefix_str: str,
+    target_str: str,
+    prefix_choices: tuple[str, ...],
+    noun_choices: tuple[str, ...],
+) -> Optional[tuple[float, str]]:
+    """Return ``(combined_score, canonical_noun)`` if both fuzzy-match, else None."""
+    p_match = process.extractOne(
+        prefix_str, prefix_choices, scorer=fuzz.ratio,
+        score_cutoff=PREFIX_SCORE_THRESHOLD,
+    )
+    if p_match is None:
+        return None
+    p_score = p_match[1]
+
+    n_match = process.extractOne(
+        target_str, noun_choices, scorer=fuzz.ratio,
+        score_cutoff=NOUN_SCORE_THRESHOLD,
+    )
+    if n_match is None:
+        return None
+    n_score = n_match[1]
+
+    combined = (p_score + n_score) / 2.0
+    if combined < COMBINED_THRESHOLD:
+        return None
+    return combined, n_match[0]

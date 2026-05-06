@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0d1117" />
+    <title>Lumen</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="header">
+        <h1 class="title">Lumen</h1>
+        <p class="subtitle">Task-oriented assistive system</p>
+      </header>
+
+      <section class="status" aria-live="polite">
+        <div class="status-row">
+          <span class="status-label">Connection</span>
+          <span id="conn-indicator" class="status-pill conn-disconnected">disconnected</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">State</span>
+          <span id="state-indicator" class="status-pill state-idle">idle</span>
+        </div>
+        <p id="last-transcription" class="transcription" aria-live="polite"></p>
+        <p id="last-error" class="error-msg" role="alert"></p>
+      </section>
+
+      <section class="controls">
+        <div class="primary-controls">
+          <button id="btn-start" class="btn btn-start">Start</button>
+          <button id="btn-stop" class="btn btn-stop" disabled>Stop</button>
+        </div>
+
+        <button
+          id="btn-ptt"
+          class="btn btn-ptt"
+          disabled
+          aria-label="Push to talk - hold while speaking"
+        >
+          <span class="ptt-icon" aria-hidden="true">&#127908;</span>
+          <span class="ptt-label">Hold to talk</span>
+        </button>
+      </section>
+
+      <video id="video-preview" class="video-preview" autoplay muted playsinline></video>
+
+      <footer class="footer">
+        <p>
+          Sprint 1 vertical slice. Press Start, hold the mic button and say
+          <em>"find my cup"</em> or <em>"navigate to the kitchen"</em>.
+        </p>
+      </footer>
+    </main>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+# Lumen backend dependencies (Sprint 1)
+# Pin to known-good versions. Bump deliberately when needed.
+
+# Web framework + WebSocket
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+websockets==13.1
+python-multipart==0.0.12
+
+# Vision pipeline (Sprint 1: Pillow only for JPEG decode; YOLO comes in Sprint 3)
+Pillow==11.0.0
+numpy==2.1.3
+
+# Voice pipeline
+gTTS==2.5.4
+openai-whisper==20240930
+# pydub uses ffmpeg under the hood for WebM/Opus → WAV conversion
+pydub==0.25.1
+
+# Command parsing
+rapidfuzz==3.10.1
+
+# Tests
+pytest==8.3.3
+pytest-asyncio==0.24.0
