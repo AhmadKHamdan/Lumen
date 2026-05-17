@@ -60,17 +60,50 @@ Lumen/
 
 ### Backend
 
+> ⚠️ **Don't put the project inside OneDrive / iCloud / Dropbox.** Sync clients
+> lock files while pip and git try to write them, breaking venv creation and
+> commits. Put the repo somewhere like `C:\Users\<you>\Projects\Lumen` or
+> `~/Projects/Lumen`.
+
+> ⚠️ **Use Python 3.11.** Python 3.13 has rough edges with `openai-whisper`'s
+> torch dependency. We've verified Sprint 1 on Python 3.11.
+
 ```bash
 cd backend
-python -m venv .venv
 
-# Activate (pick one):
-source .venv/bin/activate           # macOS/Linux
-.venv\Scripts\activate              # Windows PowerShell
+# Create the venv with Python 3.11 specifically
+python3.11 -m venv .venv          # macOS/Linux
+"C:/Users/Asus/AppData/Local/Programs/Python/Python311/python.exe" -m venv .venv  # Windows
 
-pip install -r requirements.txt
+# Activate
+source .venv/Scripts/activate     # Git Bash on Windows
+source .venv/bin/activate         # macOS/Linux
+.venv\Scripts\Activate.ps1        # Windows PowerShell
+```
+
+Then install dependencies. **Do this in two steps because of the openai-whisper
+build gotcha:**
+
+```bash
+# 1. Pin setuptools<80 in the venv first (openai-whisper's setup.py imports
+#    pkg_resources, which setuptools 80+ removed)
+python -m pip install --upgrade pip
+python -m pip install "setuptools<80" wheel
+
+# 2. Build openai-whisper with --no-build-isolation so it uses the
+#    setuptools<80 we just installed (instead of pip pulling latest)
+python -m pip install --no-build-isolation openai-whisper==20240930
+
+# 3. Install the rest (these all ship wheels and install cleanly)
+python -m pip install -r requirements.txt
+
+# 4. Run the server
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+> 💡 **If `which python` shows the global Python after activation** (Git Bash
+> quirk), call the venv Python explicitly: `./.venv/Scripts/python.exe -m pip ...`
+> and `./.venv/Scripts/python.exe -m uvicorn main:app --reload`.
 
 The first request that triggers Whisper will download the `whisper-base` model
 (~140 MB) into `~/.cache/whisper/`. This happens once.

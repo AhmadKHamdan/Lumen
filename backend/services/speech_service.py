@@ -1,14 +1,24 @@
 """
 Speech-to-text service.
 
-Wraps OpenAI Whisper (the local ``whisper-base`` model, English only).
-Designed to be standalone and importable - run from a Python REPL.
+Wraps faster-whisper (the local ``base`` model, English only). Designed to be
+standalone and importable - run from a Python REPL.
 
-Whisper expects 16 kHz mono WAV input. The browser sends WebM/Opus, so we
-decode it via pydub (which shells out to ffmpeg). ffmpeg must be on PATH.
+Why faster-whisper instead of openai-whisper?
+- Same Whisper models under the hood (model weights from HuggingFace).
+- Ships pre-built wheels for Python 3.13 (openai-whisper's setup.py breaks
+  on 3.13 due to PEP 667; see requirements.txt comment).
+- ~4x faster CPU inference via CTranslate2.
+- No torch dependency (smaller install footprint).
 
-The first call lazy-loads the model (~140MB download on first run, cached
-to ``~/.cache/whisper/``). Subsequent calls reuse the loaded model.
+Whisper expects 16 kHz mono float32 PCM input. The browser sends WebM/Opus,
+so we decode it via PyAV - the FFmpeg Python bindings, which ship the FFmpeg
+shared libraries inside their wheel. No external ``ffmpeg.exe`` on PATH
+required.
+
+The first call lazy-loads the model. faster-whisper downloads the model from
+HuggingFace (~150 MB for ``base``) into the HF cache the first time. Subsequent
+calls reuse the loaded model.
 
 Returns a dict ``{"text": str, "confidence": float}`` where confidence is a
 heuristic in [0, 1] derived from Whisper's average log-probability:
@@ -23,73 +33,101 @@ from __future__ import annotations
 import io
 import logging
 import math
-import tempfile
 import threading
-from pathlib import Path
 
+import av
 import numpy as np
-from pydub import AudioSegment
 
 log = logging.getLogger("lumen.stt")
 
-# Model name. ``base`` is ~140MB and runs in CPU-friendly time. ``tiny`` is
+# Model size. ``base`` is ~150MB and runs in CPU-friendly time. ``tiny`` is
 # faster but markedly less accurate on short utterances.
 _MODEL_NAME = "base"
 
-_model = None  # whisper.model.Whisper - lazy-loaded
+# CPU inference quantization. ``int8`` is the fastest CPU-friendly option;
+# ``float16`` or ``float32`` are options if you need higher accuracy.
+_COMPUTE_TYPE = "int8"
+
+# Whisper always wants 16 kHz mono input.
+_TARGET_SAMPLE_RATE = 16000
+
+_model = None  # faster_whisper.WhisperModel - lazy-loaded
 _model_lock = threading.Lock()
 
 
 def _get_model():
-    """Lazy-load the Whisper model on first call."""
+    """Lazy-load the faster-whisper model on first call."""
     global _model
     if _model is not None:
         return _model
     with _model_lock:
         if _model is not None:
             return _model
-        log.info("Loading Whisper model %r (this may take a while on first run)", _MODEL_NAME)
-        import whisper  # local import - ~1s import cost
-        _model = whisper.load_model(_MODEL_NAME)
-        log.info("Whisper model loaded")
+        log.info(
+            "Loading faster-whisper model %r compute=%s "
+            "(downloads ~150MB from HuggingFace on first run)",
+            _MODEL_NAME, _COMPUTE_TYPE,
+        )
+        # Local import keeps module import cost low until the first transcribe call.
+        from faster_whisper import WhisperModel
+        _model = WhisperModel(_MODEL_NAME, device="cpu", compute_type=_COMPUTE_TYPE)
+        log.info("faster-whisper model loaded")
     return _model
 
 
-def _decode_to_pcm(audio_bytes: bytes, mime_type: str) -> np.ndarray:
+def _decode_to_pcm(audio_bytes: bytes) -> np.ndarray:
     """Decode an arbitrary audio blob to 16 kHz mono float32 PCM in [-1, 1].
 
-    pydub handles WebM/Opus, MP3, WAV, etc. via ffmpeg.
+    Uses PyAV (FFmpeg bindings, with FFmpeg shared libs bundled into the
+    wheel). No external ``ffmpeg.exe`` is required.
+
+    PyAV happily auto-detects WebM/Opus, OGG/Opus, MP3, WAV, M4A and friends
+    from the bytes themselves, so we don't need a MIME-type hint.
+
+    Returns an empty array if the blob is empty or has no audio stream.
     """
-    fmt_hint = _format_hint_from_mime(mime_type)
-    log.debug("Decoding %d bytes as fmt=%s", len(audio_bytes), fmt_hint)
+    if not audio_bytes:
+        return np.empty(0, dtype=np.float32)
 
-    seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt_hint)
-    seg = seg.set_frame_rate(16000).set_channels(1).set_sample_width(2)  # 16-bit PCM
+    log.debug("PyAV decode: %d bytes", len(audio_bytes))
 
-    # Convert to float32 in [-1, 1]
-    samples = np.array(seg.get_array_of_samples(), dtype=np.int16)
-    pcm = samples.astype(np.float32) / 32768.0
+    container = av.open(io.BytesIO(audio_bytes))
+    try:
+        audio_streams = [s for s in container.streams if s.type == "audio"]
+        if not audio_streams:
+            log.warning("PyAV: no audio stream found in blob")
+            return np.empty(0, dtype=np.float32)
+        audio_stream = audio_streams[0]
+
+        # Resample to 16 kHz mono float32. PyAV format strings:
+        #   "flt"  = AV_SAMPLE_FMT_FLT (float32 packed)
+        #   "fltp" = AV_SAMPLE_FMT_FLTP (float32 planar)
+        # Packed is fine for mono; the resulting ndarray comes out as (1, N).
+        resampler = av.AudioResampler(
+            format="flt",
+            layout="mono",
+            rate=_TARGET_SAMPLE_RATE,
+        )
+
+        chunks: list[np.ndarray] = []
+        for frame in container.decode(audio_stream):
+            for resampled in resampler.resample(frame):
+                arr = resampled.to_ndarray()
+                # to_ndarray returns shape (channels, samples) for mono packed.
+                # Flatten regardless to be defensive.
+                chunks.append(arr.flatten())
+
+        # Flush any trailing samples held by the resampler.
+        for resampled in resampler.resample(None):
+            arr = resampled.to_ndarray()
+            chunks.append(arr.flatten())
+    finally:
+        container.close()
+
+    if not chunks:
+        return np.empty(0, dtype=np.float32)
+    pcm = np.concatenate(chunks).astype(np.float32, copy=False)
     return pcm
-
-
-def _format_hint_from_mime(mime_type: str) -> str:
-    """Guess the pydub format hint from the MIME type.
-
-    pydub accepts: 'webm', 'ogg', 'mp3', 'wav', 'm4a', etc.
-    """
-    mime = (mime_type or "").lower()
-    if "webm" in mime:
-        return "webm"
-    if "ogg" in mime or "opus" in mime:
-        return "ogg"
-    if "mp3" in mime or "mpeg" in mime:
-        return "mp3"
-    if "wav" in mime or "wave" in mime:
-        return "wav"
-    if "m4a" in mime or "mp4" in mime:
-        return "m4a"
-    # Default - let ffmpeg sniff it
-    return "webm"
 
 
 def _avg_logprob_to_confidence(avg_logprob: float) -> float:
@@ -100,7 +138,7 @@ def _avg_logprob_to_confidence(avg_logprob: float) -> float:
     return max(0.0, min(1.0, p))
 
 
-def transcribe(audio_bytes: bytes, mime_type: str) -> dict:
+def transcribe(audio_bytes: bytes, mime_type: str = "") -> dict:
     """Transcribe ``audio_bytes`` to text + confidence proxy.
 
     Parameters
@@ -108,7 +146,8 @@ def transcribe(audio_bytes: bytes, mime_type: str) -> dict:
     audio_bytes : bytes
         The raw audio blob (typically WebM/Opus from MediaRecorder).
     mime_type : str
-        e.g. ``"audio/webm;codecs=opus"`` (used as a hint for the decoder).
+        Kept for API compatibility. Ignored - PyAV auto-detects the format
+        from the bytes.
 
     Returns
     -------
@@ -121,28 +160,32 @@ def transcribe(audio_bytes: bytes, mime_type: str) -> dict:
 
     model = _get_model()
 
-    pcm = _decode_to_pcm(audio_bytes, mime_type)
+    try:
+        pcm = _decode_to_pcm(audio_bytes)
+    except av.AVError as e:
+        log.warning("PyAV decode failed: %s", e)
+        return {"text": "", "confidence": 0.0}
+
     if pcm.size == 0:
         return {"text": "", "confidence": 0.0}
 
-    # Whisper accepts a 1-D float32 numpy array directly.
-    result = model.transcribe(
+    # faster-whisper accepts a 1-D float32 numpy array directly.
+    # ``transcribe()`` returns (segments_generator, info). We have to
+    # materialize the generator to actually run inference.
+    segments_gen, _info = model.transcribe(
         pcm,
         language="en",
-        fp16=False,                # CPU-friendly default
+        beam_size=5,
         condition_on_previous_text=False,
+        vad_filter=False,  # PTT chunks are already trimmed by the user's button release
     )
+    segments = list(segments_gen)
 
-    text = (result.get("text") or "").strip()
-    # Aggregate avg_logprob across segments (Whisper returns a list).
-    segments = result.get("segments") or []
+    text = "".join(s.text for s in segments).strip()
+
     if segments:
-        logprobs = [s.get("avg_logprob") for s in segments
-                    if s.get("avg_logprob") is not None]
-        if logprobs:
-            avg = sum(logprobs) / len(logprobs)
-        else:
-            avg = float("-inf")
+        logprobs = [s.avg_logprob for s in segments if s.avg_logprob is not None]
+        avg = sum(logprobs) / len(logprobs) if logprobs else float("-inf")
     else:
         avg = float("-inf")
     confidence = _avg_logprob_to_confidence(avg)

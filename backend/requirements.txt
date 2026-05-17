@@ -1,25 +1,36 @@
 # Lumen backend dependencies (Sprint 1)
 # Pin to known-good versions. Bump deliberately when needed.
 
-# Web framework + WebSocket
+# --- Web framework + WebSocket ---------------------------------------------
 fastapi==0.115.4
 uvicorn[standard]==0.32.0
 websockets==13.1
 python-multipart==0.0.12
 
-# Vision pipeline (Sprint 1: Pillow only for JPEG decode; YOLO comes in Sprint 3)
+# --- Vision pipeline (Sprint 1: Pillow only; YOLO comes in Sprint 3) -------
 Pillow==11.0.0
 numpy==2.1.3
 
-# Voice pipeline
+# --- Voice pipeline --------------------------------------------------------
 gTTS==2.5.4
-openai-whisper==20240930
-# pydub uses ffmpeg under the hood for WebM/Opus → WAV conversion
-pydub==0.25.1
+# faster-whisper instead of openai-whisper:
+#   - openai-whisper's setup.py uses `locals()` after exec(), which broke on
+#     Python 3.13 (PEP 667). Every version is affected.
+#   - faster-whisper ships pre-built wheels, uses the same Whisper models
+#     under the hood (downloaded from HuggingFace on first run), runs ~4x
+#     faster on CPU via CTranslate2, and doesn't pull in torch.
+# Open lower bound so pip picks the latest, which pulls in a recent PyAV
+# (>=13) that has Python 3.13 Windows wheels. The earlier 1.0.3 pin pulled
+# a too-old av that wouldn't wheel-install on 3.13.
+faster-whisper>=1.1.0
+# Belt-and-braces: explicitly require an av that has 3.13 wheels.
+# (We also use PyAV directly to decode PTT audio blobs in speech_service.py,
+# avoiding the need for a system-installed ffmpeg.exe on PATH.)
+av>=13.0.0
 
-# Command parsing
+# --- Command parsing -------------------------------------------------------
 rapidfuzz==3.10.1
 
-# Tests
+# --- Tests -----------------------------------------------------------------
 pytest==8.3.3
 pytest-asyncio==0.24.0
