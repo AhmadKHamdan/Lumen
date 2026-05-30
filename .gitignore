@@ -24,6 +24,10 @@ ENV/
 backend/captured_audio/*
 !backend/captured_audio/.gitkeep
 
+# ML model weights (auto-downloaded by ultralytics on first detect)
+*.pt
+backend/yolov8n.pt
+
 # Frontend
 node_modules/
 dist/

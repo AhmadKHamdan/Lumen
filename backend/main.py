@@ -4,6 +4,9 @@ Lumen backend - FastAPI entrypoint.
 Hosts:
   - GET  /health  : lightweight liveness probe
   - WS   /ws      : single WebSocket endpoint, one connection per session
+  - GET  /*       : the frontend (../frontend), mounted last so the routes
+                    above take priority. Serving the page same-origin is what
+                    makes wss://<same-host>/ws work behind any tunnel/host.
 
 The Session class (api/session.py) holds per-connection state. The Router
 (api/router.py) parses incoming messages and dispatches to handlers. The FSM
@@ -12,13 +15,18 @@ state of its own beyond a "connected" indicator.
 
 Run locally:
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+Open http://localhost:8000 in a browser - that loads the frontend and the
+frontend opens the WebSocket back to the same origin automatically.
 """
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from api.session import Session
 
@@ -74,3 +82,16 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     finally:
         await session.cleanup()
         log.info("Session %s ended", session.id)
+
+
+# ---------- frontend (mounted last so /health and /ws win) ----------
+
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+if FRONTEND_DIR.is_dir():
+    # html=True makes GET / serve index.html, and unknown paths under /
+    # fall back to index.html only if they don't exist (handy for SPAs).
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    log.info("Serving frontend from %s", FRONTEND_DIR)
+else:
+    log.warning("Frontend directory not found at %s; serving API only", FRONTEND_DIR)

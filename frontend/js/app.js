@@ -6,15 +6,25 @@ import { MediaController } from "./media.js";
 import { AudioQueue } from "./audio_queue.js";
 import { WakeLockManager } from "./wakelock.js";
 
-// Backend URL. Default to localhost:8000 - override via ?backend= in the URL.
+// Backend URL.
+//
+// Strategy:
+//   1. Honour an explicit ?backend= URL override (handy for local dev with the
+//      page opened as file:// pointed at a remote backend).
+//   2. Otherwise, derive the WebSocket URL from the page itself: same host,
+//      same port, scheme swapped to ws:// (http) or wss:// (https). This is
+//      what makes the app work unchanged behind Cloudflare Tunnel, Azure,
+//      ngrok, etc. - whatever serves the page also serves /ws.
+//   3. Fallback (file:// or unknown protocol): the local backend.
 function backendURL() {
   const params = new URLSearchParams(window.location.search);
   const override = params.get("backend");
   if (override) return override;
-  // Build ws:// or wss:// based on the page protocol if we're on https,
-  // otherwise default to ws:// to localhost.
-  if (window.location.protocol === "https:") {
-    return `wss://${window.location.host.replace(/:\d+$/, "")}:8000/ws`;
+
+  const proto = window.location.protocol;
+  if (proto === "https:" || proto === "http:") {
+    const wsProto = proto === "https:" ? "wss" : "ws";
+    return `${wsProto}://${window.location.host}/ws`;
   }
   return "ws://localhost:8000/ws";
 }
@@ -93,6 +103,13 @@ btnStart.addEventListener("click", async () => {
   if (active) return;
   lastError.textContent = "";
   lastTranscription.textContent = "";
+
+  // Unlock audio output for the page WHILE STILL INSIDE THE CLICK GESTURE.
+  // Mobile browsers (iOS Safari, Android Chrome) silently reject .play()
+  // calls on audio that arrives outside a user-gesture call stack - which
+  // is exactly what TTS clips are once they come back from the server.
+  // Priming here, before any await, registers our intent to play audio.
+  audioQueue.prime();
 
   try {
     await media.start();

@@ -16,11 +16,16 @@ States
 Events
 ------
 - ``user_start``        : Idle → ListeningForCommand
-- ``user_stop``         : any active state → ReturningToIdle
+- ``user_stop``         : any active state → ReturningToIdle (i.e. end the
+                           whole session - this is what the UI Stop button
+                           fires)
 - ``command_recognized`` : ListeningForCommand → ObjectAllocationActive | NavigationActive,
                            depending on payload['task_type']
 - ``command_unknown``   : ListeningForCommand → ListeningForCommand (no-op, for symmetry)
 - ``task_complete``     : Object/Nav/Returning → ReturningToIdle → Idle
+- ``task_abort``        : Object/Nav → ListeningForCommand (cancel the current
+                           task but stay in the session, ready for the next
+                           voice command - this is what voice "cancel" fires)
 - ``cleanup_done``      : ReturningToIdle → Idle (caller signals cleanup is done)
 
 Subscribers
@@ -131,6 +136,14 @@ class TaskFSM:
         if event == "task_complete":
             if s in (FSMState.OBJECT_ACTIVE, FSMState.NAV_ACTIVE):
                 return FSMState.RETURNING
+            return None
+
+        if event == "task_abort":
+            # Cancel the current task but DON'T end the session - drop back
+            # to listening so the user can immediately say another command
+            # without pressing Start again. Voice "cancel" routes through here.
+            if s in (FSMState.OBJECT_ACTIVE, FSMState.NAV_ACTIVE):
+                return FSMState.LISTENING
             return None
 
         if event == "cleanup_done":

@@ -1,4 +1,4 @@
-# Lumen backend dependencies (Sprint 1)
+# Lumen backend dependencies (Sprints 1-3)
 # Pin to known-good versions. Bump deliberately when needed.
 
 # --- Web framework + WebSocket ---------------------------------------------
@@ -7,9 +7,16 @@ uvicorn[standard]==0.32.0
 websockets==13.1
 python-multipart==0.0.12
 
-# --- Vision pipeline (Sprint 1: Pillow only; YOLO comes in Sprint 3) -------
+# --- Vision pipeline -------------------------------------------------------
 Pillow==11.0.0
 numpy==2.1.3
+# Object detection (Sprint 3). ultralytics ships the YOLOv8 family; the
+# yolov8n.pt weights (~6 MB) auto-download from the ultralytics CDN on the
+# first inference call and are cached under ~/.config/Ultralytics (or
+# %APPDATA%\Ultralytics on Windows). ultralytics pulls in torch + torchvision
+# + opencv automatically; recent 8.3.x releases have Python 3.13 wheels for
+# all of them. Open lower bound so pip resolves a 3.13-compatible torch.
+ultralytics>=8.3.0
 
 # --- Voice pipeline --------------------------------------------------------
 gTTS==2.5.4

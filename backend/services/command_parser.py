@@ -5,7 +5,14 @@ Bridges raw Whisper transcriptions to FSM-ready intents:
 
     "find my cup"      ->  {"task_type": "object_allocation", "target": "cup", ...}
     "navigate kitchen" ->  {"task_type": "navigation",        "target": "kitchen", ...}
+    "got it"           ->  {"task_type": "completion",        "target": "confirm", ...}
+    "never mind"       ->  {"task_type": "completion",        "target": "cancel", ...}
     "what time is it"  ->  {"task_type": "unknown",            ...}
+
+The "completion" task_type is recognized during an active task: a confirm
+phrase ("got it", "found it") signals the user succeeded; a cancel phrase
+("stop", "never mind") aborts. The FSM/audio layer decides whether the current
+state actually accepts it - the parser only classifies the words.
 
 Algorithm
 ---------
@@ -143,11 +150,52 @@ SYNONYMS: dict[str, str] = {
 }
 
 
+# Completion / cancel phrases said *during* an active task. "confirm" means
+# the user has the object (or arrived); "cancel" means abort the task.
+COMPLETION_CONFIRM_PHRASES: tuple[str, ...] = (
+    "got it",
+    "i got it",
+    "i have got it",
+    "found it",
+    "i found it",
+    "i have it",
+    "i have got the",
+    "thats it",
+    "that is it",
+    "thank you",
+    "thanks",
+    "done",
+    "all done",
+)
+
+COMPLETION_CANCEL_PHRASES: tuple[str, ...] = (
+    "stop",
+    "stop it",
+    "stop searching",
+    "cancel",
+    "cancel it",
+    "never mind",
+    "nevermind",
+    "forget it",
+    "forget about it",
+    "quit",
+    "abort",
+    "give up",
+)
+
+
 # ---------- thresholds ----------
 
 PREFIX_SCORE_THRESHOLD = 70   # how close a prefix must be to a template
 NOUN_SCORE_THRESHOLD = 60     # how close a target must be to a noun
 COMBINED_THRESHOLD = 65       # average of prefix + noun must clear this
+
+# Completion phrases are short, so we match the whole utterance (token-set, to
+# tolerate filler like "okay ... thanks") and require a high score. We only
+# attempt this on short utterances to avoid stealing real find/navigate
+# commands.
+COMPLETION_SCORE_THRESHOLD = 86
+COMPLETION_MAX_WORDS = 5
 
 
 # ---------- main entry ----------
@@ -169,6 +217,19 @@ def parse(text: str) -> dict:
 
     if not words:
         return _unknown(raw)
+
+    # Completion / cancel commands are short and structurally unlike the
+    # prefix+noun find/navigate commands, so we test them first.
+    comp = _match_completion(norm, words)
+    if comp is not None:
+        target, score = comp
+        return {
+            "task_type": "completion",
+            "target": target,  # "confirm" | "cancel"
+            "raw": raw,
+            "needs_clarification": False,
+            "score": round(score, 1),
+        }
 
     best: Optional[tuple[float, str, str]] = None  # (score, task_type, target)
 
@@ -233,6 +294,10 @@ def confirmation_phrase(intent: dict) -> str:
         return f"Looking for your {target}."
     if ttype == "navigation":
         return f"Navigating to the {target}."
+    if ttype == "completion":
+        # The object/destination isn't known here (target is confirm/cancel),
+        # so the audio layer normally voices a target-aware phrase instead.
+        return "Okay." if target == "cancel" else "Got it."
     return "I didn't catch that, please repeat."
 
 
@@ -260,6 +325,36 @@ def _unknown(raw: str) -> dict:
         "needs_clarification": True,
         "score": 0.0,
     }
+
+
+def _match_completion(norm: str, words: list[str]) -> Optional[tuple[str, float]]:
+    """Detect a completion (confirm/cancel) command.
+
+    Returns ``("confirm" | "cancel", score)`` if the utterance matches a
+    completion phrase above threshold, else None. Uses token-set ratio so
+    "okay i got it thanks" still matches "got it", and bails on long
+    utterances (those are find/navigate commands, not completions).
+    """
+    if not words or len(words) > COMPLETION_MAX_WORDS:
+        return None
+
+    confirm = process.extractOne(
+        norm, COMPLETION_CONFIRM_PHRASES, scorer=fuzz.token_set_ratio,
+        score_cutoff=COMPLETION_SCORE_THRESHOLD,
+    )
+    cancel = process.extractOne(
+        norm, COMPLETION_CANCEL_PHRASES, scorer=fuzz.token_set_ratio,
+        score_cutoff=COMPLETION_SCORE_THRESHOLD,
+    )
+
+    c_score = confirm[1] if confirm else 0.0
+    x_score = cancel[1] if cancel else 0.0
+
+    if c_score == 0.0 and x_score == 0.0:
+        return None
+    if x_score >= c_score:
+        return "cancel", x_score
+    return "confirm", c_score
 
 
 def _match_prefix_and_noun(

@@ -56,6 +56,11 @@ class Session:
         self.latest_frame_at: Optional[float] = None
         self.task_context: dict[str, Any] = {}
 
+        # Handle to the running async task loop for the active task (e.g. the
+        # Object Allocation detection loop). object_allocation.start/stop own
+        # this; cleanup() cancels it on disconnect.
+        self.detection_task: Optional[asyncio.Task] = None
+
         # FSM owned by this session
         self.fsm: TaskFSM = TaskFSM()
         self.fsm.subscribe(self._on_fsm_change)
@@ -95,8 +100,11 @@ class Session:
 
     async def cleanup(self) -> None:
         """Release any resources tied to this session."""
-        # Sprint 1 has no GPU buffers / external connections to release.
-        # Future sprints might cancel running tasks here.
+        # Cancel any running task loop (Object Allocation detection, etc.).
+        task = self.detection_task
+        if task is not None and not task.done():
+            task.cancel()
+        self.detection_task = None
         self.latest_frame = None
         self.task_context.clear()
 
@@ -173,6 +181,11 @@ class Session:
             # Sprint 1: clean up task context immediately. The cleanup_done
             # event must be deferred to the next loop tick so the
             # send_fsm_state(RETURNING) below fires before send_fsm_state(IDLE).
+            self.task_context.clear()
+        elif new == FSMState.LISTENING:
+            # task_abort skips RETURNING and drops straight to LISTENING, so
+            # we have to clear leftover task_context ourselves. Safe to clear
+            # unconditionally - LISTENING is "no active task" by definition.
             self.task_context.clear()
 
         # Push state to client (async, scheduled on the loop)

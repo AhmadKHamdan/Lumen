@@ -64,10 +64,12 @@ class Router:
         elif event in ("stop", "cancel"):
             self.session.fsm.handle_event("user_stop")
         elif event == "confirm":
-            # Sprint 1: just log. Sprint 3 will use this to mark Object
-            # Allocation tasks as complete.
-            log.info("Session %s: user confirm (Sprint 1 no-op)",
-                     self.session.id)
+            # User signalled task completion via the UI (the voice path "got
+            # it" routes through audio_handler instead). task_complete is only
+            # valid from an active task; the FSM rejects it otherwise.
+            accepted = self.session.fsm.handle_event("task_complete")
+            log.info("Session %s: user confirm -> task_complete accepted=%s",
+                     self.session.id, accepted)
         else:
             log.warning("Session %s: unknown user_event %r",
                         self.session.id, event)

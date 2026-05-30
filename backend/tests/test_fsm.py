@@ -235,3 +235,52 @@ def test_user_stop_works_from_any_active_state(active_state_setup):
     assert fsm.state != FSMState.IDLE
     assert fsm.handle_event("user_stop") is True
     assert fsm.state == FSMState.RETURNING
+
+
+# ---------- task_abort: voice cancel keeps the session alive ----------
+
+def test_task_abort_from_object_active_returns_to_listening():
+    fsm = TaskFSM()
+    fsm.handle_event("user_start")
+    fsm.handle_event("command_recognized",
+                     payload={"task_type": "object_allocation", "target": "cup"})
+    assert fsm.state == FSMState.OBJECT_ACTIVE
+    assert fsm.handle_event("task_abort") is True
+    assert fsm.state == FSMState.LISTENING
+
+
+def test_task_abort_from_nav_active_returns_to_listening():
+    fsm = TaskFSM()
+    fsm.handle_event("user_start")
+    fsm.handle_event("command_recognized",
+                     payload={"task_type": "navigation", "target": "kitchen"})
+    assert fsm.state == FSMState.NAV_ACTIVE
+    assert fsm.handle_event("task_abort") is True
+    assert fsm.state == FSMState.LISTENING
+
+
+def test_task_abort_rejected_outside_active_states():
+    # From IDLE
+    fsm = TaskFSM()
+    assert fsm.handle_event("task_abort") is False
+    assert fsm.state == FSMState.IDLE
+
+    # From LISTENING
+    fsm = TaskFSM()
+    fsm.handle_event("user_start")
+    assert fsm.handle_event("task_abort") is False
+    assert fsm.state == FSMState.LISTENING
+
+
+def test_task_abort_then_new_command_works():
+    """The whole point of task_abort: a new command must be accepted right after."""
+    fsm = TaskFSM()
+    fsm.handle_event("user_start")
+    fsm.handle_event("command_recognized",
+                     payload={"task_type": "object_allocation", "target": "cup"})
+    fsm.handle_event("task_abort")
+    # Now in LISTENING - a fresh command_recognized must be accepted.
+    ok = fsm.handle_event("command_recognized",
+                          payload={"task_type": "object_allocation", "target": "bottle"})
+    assert ok is True
+    assert fsm.state == FSMState.OBJECT_ACTIVE
