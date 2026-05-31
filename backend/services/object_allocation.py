@@ -35,7 +35,14 @@ import time
 from collections import deque
 from typing import TYPE_CHECKING, Optional, Sequence
 
-from services import guidance_generator, spatial_reasoning, tts_service, yolo_service
+from services import (
+    guidance_generator,
+    hand_service,
+    reach_guidance,
+    spatial_reasoning,
+    tts_service,
+    yolo_service,
+)
 
 if TYPE_CHECKING:
     from api.session import Session
@@ -55,6 +62,11 @@ CONF_THRESHOLD = 0.35           # YOLO confidence floor for this task
 GUIDANCE_REAFFIRM_SEC = 6.0     # re-speak unchanged guidance at most this often
 SCAN_PROMPT_INTERVAL_SEC = 8.0  # cadence of "turn around" prompts while unseen
 TASK_TIMEOUT_SEC = 60.0         # give up if never seen within this many seconds
+
+# Reach mode (Sprint 5: hand guidance, only fires when target is near AND a
+# hand is detected). Cues feel more urgent than body-direction cues, so the
+# re-affirm interval is shorter.
+REACH_REAFFIRM_SEC = 3.0
 
 
 class GuidanceTracker:
@@ -88,16 +100,28 @@ class GuidanceTracker:
         self.started: Optional[float] = None
         self.ever_seen = False
         self.last_region: Optional[str] = None
+        self.last_distance: Optional[str] = None
         self.last_spoken_key: Optional[tuple[str, str]] = None
         self.last_spoken_at = 0.0
         self.last_scan_at = 0.0
+        # Reach-mode state (Sprint 5). last_reach_key is the (state, direction)
+        # tuple of the most recently spoken reach cue, used for throttling.
+        self.last_reach_key: Optional[tuple[str, str]] = None
+        self.last_reach_at = 0.0
+
+    def should_check_hand(self) -> bool:
+        """Cheap pre-check for the detection loop: only worth running
+        MediaPipe when the target was most recently classified as 'near'.
+        Saves ~15 ms per frame in the common 'still looking' case."""
+        return self.last_distance == "near"
 
     def update(
         self,
         detections: Sequence,
         frame_shape: Optional[Sequence[int]],
         now: float,
-    ) -> Optional[tuple[str, str]]:
+        hand_pose=None,
+    ) -> Optional[tuple[str, Optional[str]]]:
         if self.started is None:
             self.started = now
             # Delay the first scan prompt by a full interval so it doesn't talk
@@ -122,6 +146,15 @@ class GuidanceTracker:
             info = spatial_reasoning.locate(best.box, w, h, label=best.label)
             self.ever_seen = True
             self.last_region = info.region
+            self.last_distance = info.distance
+
+            # Reach mode: target is within arm's reach AND we can see the
+            # user's hand. The body-direction guidance has done its job; now
+            # we're guiding the hand to the box and waiting for contact.
+            if info.distance == "near" and hand_pose is not None:
+                return self._update_reach(best, hand_pose, w, h, now)
+
+            # Otherwise: standard direction + distance guidance.
             key = (info.region, info.distance)
             stale = (now - self.last_spoken_at) >= self.reaffirm_sec
             if key != self.last_spoken_key or stale:
@@ -133,6 +166,9 @@ class GuidanceTracker:
                 )
                 self.last_spoken_key = key
                 self.last_spoken_at = now
+                # Leaving reach mode -> forget the prior reach cue so re-entering
+                # later doesn't get suppressed by the throttle key.
+                self.last_reach_key = None
                 return ("guide", phrase)
             return None
 
@@ -152,6 +188,39 @@ class GuidanceTracker:
             return None
 
         # Transient miss (1-2 of last 5) or post-lost silence -> stay quiet.
+        return None
+
+    def _update_reach(self, best_det, hand_pose, w, h, now):
+        """Decide the next reach-mode cue (called only when near + hand seen).
+
+        Returns
+        -------
+        ("touch", phrase) - fingertip is inside the box. The loop must
+                            fire FSM task_complete after speaking the phrase.
+                            Only emitted once per session.
+        ("reach", phrase) - directional or "almost" cue, throttled.
+        None              - same cue as last time and still within the
+                            re-affirm window.
+        """
+        reach = reach_guidance.assess_reach(
+            best_det.box, hand_pose.fingertip, w, h,
+        )
+
+        if reach.state == "touching":
+            # Touch fires task_complete; only emit once even if the loop
+            # ticks before the FSM transition cancels us.
+            if self.last_reach_key == ("touching", "center"):
+                return None
+            self.last_reach_key = ("touching", "center")
+            self.last_reach_at = now
+            return ("touch", reach_guidance.reach_phrase(self.target, reach))
+
+        key = (reach.state, reach.direction)
+        stale = (now - self.last_reach_at) >= REACH_REAFFIRM_SEC
+        if key != self.last_reach_key or stale:
+            self.last_reach_key = key
+            self.last_reach_at = now
+            return ("reach", reach_guidance.reach_phrase(self.target, reach))
         return None
 
 
@@ -217,12 +286,36 @@ async def _run(session: "Session", target: str) -> None:
                     log.exception("Session %s: detection failed", session.id)
                     detections = []
 
+            # Hand detection only when the tracker says we're in (or just left)
+            # reach-distance. MediaPipe is cheap (~15 ms) but pointless when
+            # the target is still across the room.
+            hand_pose = None
+            if tracker.should_check_hand() and frame is not None and getattr(frame, "size", 0):
+                try:
+                    hand_pose = await loop.run_in_executor(
+                        None, hand_service.detect, frame,
+                    )
+                except Exception:
+                    log.exception("Session %s: hand detection failed", session.id)
+                    hand_pose = None
+
             frame_shape = frame.shape if frame is not None else None
-            result = tracker.update(detections, frame_shape, now)
+            result = tracker.update(detections, frame_shape, now, hand_pose=hand_pose)
 
             if result is not None:
                 action, phrase = result
-                await _speak(session, phrase)
+                if phrase:
+                    await _speak(session, phrase)
+                if action == "touch":
+                    # Auto-complete: fingertip is inside the target box. This
+                    # is the only autonomous task exit on success - everything
+                    # else waits for the user to say "got it".
+                    log.info(
+                        "Session %s: hand touched %r, auto-completing",
+                        session.id, target,
+                    )
+                    session.fsm.handle_event("task_complete")
+                    return
                 if action == "timeout":
                     # Failure exit (user-driven completion is the normal path).
                     session.fsm.handle_event("user_stop")
