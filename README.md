@@ -1,167 +1,279 @@
 # Lumen
 
-A task-oriented assistive system for blind people.
-Birzeit University · ENCS5200 Graduation Project · 2026.
+**A task-oriented assistive system that helps blind users find objects in their environment, navigate to landmarks, and reach for objects, using only a smartphone.**
 
-> **Sprint 1 status:** in progress. End-to-end vertical slice — open the page,
-> press Start, hold push-to-talk, say "find my cup", hear "looking for your cup"
-> come back as audio. No object detection or navigation logic yet (Sprints 2–4).
+[![Python](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/server-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
+[![YOLOv8n](https://img.shields.io/badge/vision-YOLOv8n-orange.svg)](https://docs.ultralytics.com/)
+[![MediaPipe](https://img.shields.io/badge/hands-MediaPipe-4285F4.svg)](https://developers.google.com/mediapipe)
+[![Whisper](https://img.shields.io/badge/STT-faster--whisper-7c3aed.svg)](https://github.com/SYSTRAN/faster-whisper)
 
-## Team
+> Birzeit University - ENCS5200 Graduation Project - 2026.
 
-- Diaa Badaha · 1210478 — Frontend, Audio Pipeline, Integration Owner
-- Ahmad Hamdan · 1210241 — Vision Pipeline & Object Allocation Task
-- Omar Husein · 1212738 — Voice Pipeline, FSM, Navigation Task
+---
 
-## Reference Documents
+## What is Lumen?
 
-- [`docs/Intro.pdf`](docs/Intro.pdf) — original design report (Feb 4, 2026). Hardware section is superseded.
-- [`docs/Lumen_Implementation_Plan.pdf`](docs/Lumen_Implementation_Plan.pdf) — six-sprint build plan. **Authoritative for implementation.**
-- [`docs/protocol.md`](docs/protocol.md) — frozen WebSocket message contract.
+A blind user opens a web page on their phone, points the camera at the room, and says **"find my cup."** Lumen answers in voice: *"Looking for your cup."* As they pan the camera, Lumen tracks the cup, calls out direction and distance ("to your left, a few steps away" -> "straight ahead, close by" -> "right in front of you, reach forward"), watches their other hand enter the frame, guides it ("move your hand to the right... almost there"), and announces grasp when the fingertip lands on the cup.
+
+No special hardware. No app install. Just a phone browser, a WebSocket, and a Python backend doing the vision and speech work.
+
+## Highlights
+
+- **Voice in, voice out.** Push-to-talk recording, server-side faster-whisper for STT, gTTS for synthesis. No screen interaction required.
+- **Three task families.** Find objects in a room, navigate toward a landmark, and reach for an object that's within arm's reach.
+- **YOLOv8n + MediaPipe Hands.** Object detection and 21-landmark hand pose, both running on CPU, ~5 FPS end-to-end.
+- **Per-class distance estimation.** "A laptop occupying 40% of frame width is near; the same image of a cup at 18% is also near" - same camera, correct guidance for each.
+- **Auto-grasp completion.** When the user's fingertip enters the target's bounding box, the task ends automatically and announces success.
+- **iOS-friendly audio.** Persistent primed `<audio>` element + Web Audio AudioContext unlock so TTS actually plays on iPhone Safari and Chrome.
+- **Phone-deployable in minutes.** Same-origin frontend + Cloudflare quick tunnel = real HTTPS URL the phone can hit, no certificates to manage.
+
+## Demo
+
+> Screenshots and a demo video will go here once recorded.
+>
+> ```
+> [ phone screenshot: search in progress ]   [ phone screenshot: reach guidance ]
+> ```
+
+---
+
+## Quickstart
+
+### Requirements
+
+- Python 3.13 (3.11+ works, 3.13 is what's verified).
+- A modern browser (tested: Chrome on Android, Safari on iOS, Chrome on desktop).
+- Optional but recommended for phone testing: [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+
+### Run the backend
+
+```bash
+cd backend
+python -m venv .venv
+
+# Activate
+source .venv/Scripts/activate          # Git Bash on Windows
+source .venv/bin/activate              # macOS / Linux
+.\.venv\Scripts\Activate.ps1           # Windows PowerShell
+
+pip install -r requirements.txt
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+First request triggers two one-time downloads:
+
+- Whisper `base` weights (~150 MB, from HuggingFace, cached in `~/.cache/huggingface/`).
+- YOLOv8n weights (`yolov8n.pt`, ~6 MB, from the ultralytics CDN).
+- MediaPipe Hands models ship inside the pip wheel - no download.
+
+### Use it
+
+Open <http://localhost:8000> in any browser. The frontend is served by FastAPI itself, so the page and the WebSocket share a single origin. Press **Start**, hold **PTT**, say "find my cup."
+
+### Phone-test it (Cloudflare Tunnel)
+
+Browsers require HTTPS for camera + microphone access except on `localhost`. Easiest path to a real HTTPS URL:
+
+```bash
+# In a second terminal (keep uvicorn running)
+cloudflared tunnel --url http://localhost:8000
+```
+
+Cloudflare prints a `https://<random>.trycloudflare.com` URL. Open it on your phone. That's it - no cert provisioning, no router config.
+
+---
+
+## Supported commands
+
+| User says | Result |
+| --- | --- |
+| "find my **cup**" / "where is my **bottle**" / "look for the **laptop**" | Start an Object Allocation task. |
+| "navigate to the **kitchen**" / "take me to the **bathroom**" | Start a Navigation task. |
+| "**got it**" / "found it" / "thanks" / "done" | Mark the current task complete and return to listening. |
+| "**stop**" / "cancel" / "never mind" / "forget it" | Abort the current task. Session stays alive for the next command. |
+
+Object Allocation supports a curated set of COCO classes (cup, bottle, chair, couch, bed, dining table, toilet, tv, laptop, mouse, remote, keyboard, cell phone, microwave, oven, sink, refrigerator, book, clock, vase, scissors). Common mishearings ("phone" -> "cell phone", "fridge" -> "refrigerator", "fone" -> "cell phone") are normalised before fuzzy matching.
+
+---
 
 ## Architecture
 
-A smartphone running Chrome opens a URL, grants camera/mic permissions, and acts as a
-thin transport for media + audio. All inference (Whisper STT, YOLOv8n object detection,
-gTTS) and the 5-state FSM live on a Python/FastAPI backend. See `docs/protocol.md` for
-the message contract.
+```
++---------------------+                +-----------------------------------+
+|  Browser (phone)    |    WebSocket   |  FastAPI backend                  |
+|                     |  <----------> |  /ws (single connection per user) |
+|  - getUserMedia     |                |                                   |
+|  - MediaRecorder    |   JSON +       |  Router -> Session -> FSM         |
+|  - <audio> element  |   binary tags  |                                   |
+|  - Push-to-talk UI  |                |  Services:                        |
++---------------------+                |    faster-whisper  (STT)          |
+                                       |    YOLOv8n         (detection)    |
+                                       |    MediaPipe Hands (hand pose)    |
+                                       |    spatial_reasoning + guidance   |
+                                       |    gTTS            (synthesis)    |
+                                       +-----------------------------------+
+```
 
-## Repo Layout
+A single `/ws` connection carries JSON control messages and three tagged binary frames:
+
+- `0x01` JPEG camera frame (client -> server, 5 FPS).
+- `0x02` WebM/Opus PTT audio blob (client -> server, on PTT release).
+- `0x03` MP3 TTS clip (server -> client).
+
+See [`docs/protocol.md`](docs/protocol.md) for the frozen wire contract.
+
+The backend is a single uvicorn process. Each connected user gets a `Session` that owns its own FSM, latest decoded frame, task context, and detection-loop asyncio task. There is no shared task state across users.
+
+### Task FSM
+
+```
+                  user_start
+                ----------------->
+   Idle                              ListeningForCommand
+   ^                                    |
+   |              cleanup_done          | command_recognized
+   |              <-------              v
+   ReturningToIdle <-----+    ObjectAllocationActive  /  NavigationActive
+            ^             \              |
+            |              \   user_stop |                task_abort
+            |               \            v               ------------>
+            +---- task_complete <--- (active states) ----> back to LISTENING
+```
+
+The FSM is authoritative for task state - the client doesn't track its own state, it just renders whatever `fsm_state` the server pushes. Every transition is driven by an explicit event (user gesture, recognised command, completion, or cancellation); there are no autonomous transitions except `cleanup_done` (one tick after entering `ReturningToIdle`) and `task_complete` on grasp.
+
+---
+
+## Task families
+
+### Object Allocation - find a thing in the room
+
+Pipeline per frame, 5 FPS:
+
+1. **Detect** the requested COCO class with YOLOv8n. Drop boxes below 0.35 confidence.
+2. **Temporal filter** - the target must appear in 3 of the last 5 frames before we trust it. Kills single-frame flickers.
+3. **Spatial reasoning** - classify the target's region (left / center / right, split at 0.35 / 0.65 of frame width) and distance (near / medium / far) using `max(width_frac, height_frac)` against a per-COCO-class threshold. The per-class threshold means a laptop at 40% width is "near", a cup at 18% is also "near", and a phone at 12% is also "near" - same numeric area, three different right answers.
+4. **Speak** a throttled, region-aware phrase. "Found your cup, to your left" first time it's seen; "Your cup is straight ahead, a few steps away" when bucket changes; same phrase silenced until either bucket changes or 6 s elapse.
+
+Edge cases handled:
+
+- Never detected within 30 s: periodic scan prompt ("I don't see your cup yet, slowly turn around").
+- Seen, then lost from view for a full 5-frame window: one-shot "I lost sight of your cup, it was to your left" announcement.
+- Never detected within 60 s: auto-abort with "I couldn't find your cup."
+- Multiple instances visible at once: guide to the most head-on one (closest centre x to frame centre).
+
+### Reach Guidance - hand-relative cues
+
+When Object Allocation has the target at `near` distance AND MediaPipe detects a hand in frame, the loop switches to hand-relative cues:
+
+- `approach` state with a named direction: "Move your hand to the right / left", "Raise your hand up", "Lower your hand."
+- `almost` state when the fingertip is within 10% of the frame from the target's centroid: "Almost there. Reach forward."
+- `touching` state when the fingertip enters the target's bounding box: "Your hand is on the cup. Grasp it." This is the **only autonomous success-exit** in the system - it fires `task_complete` automatically. Every other path requires the user to say "got it."
+
+MediaPipe is only invoked when the tracker says we're in (or just left) reach distance - it stays idle the rest of the time, saving CPU.
+
+### Navigation - guide to a landmark
+
+Sister task to Object Allocation, currently being developed by another team member. Uses YOLOv8n's furniture classes as proxy landmarks, with the same FSM scaffolding (`NavigationActive` state, the same cancel / completion verbs).
+
+---
+
+## Project structure
 
 ```
 Lumen/
-├── frontend/          # Single-page browser app (HTML + JS, no build step)
+├── backend/                       # FastAPI server (single process)
+│   ├── main.py                    # /health, /ws, mounts ../frontend
+│   ├── requirements.txt
+│   ├── api/
+│   │   ├── session.py             # one Session per WS, owns FSM + state
+│   │   ├── router.py              # JSON + binary dispatch
+│   │   ├── frame_handler.py       # JPEG -> numpy
+│   │   └── audio_handler.py       # PTT blob -> STT -> parse -> FSM -> TTS
+│   ├── fsm/
+│   │   └── task_fsm.py            # 5 states, explicit transitions only
+│   ├── services/
+│   │   ├── speech_service.py      # faster-whisper + PyAV (no ffmpeg required)
+│   │   ├── command_parser.py      # rapidfuzz intent extraction
+│   │   ├── tts_service.py         # gTTS + bounded LRU cache
+│   │   ├── yolo_service.py        # YOLOv8n via ultralytics, pure parser
+│   │   ├── hand_service.py        # MediaPipe Hands, pure landmark->pose helper
+│   │   ├── spatial_reasoning.py   # per-class distance + region classifier
+│   │   ├── guidance_generator.py  # Object Allocation phrase templates
+│   │   ├── reach_guidance.py      # fingertip-vs-target spatial logic + phrases
+│   │   ├── object_allocation.py   # GuidanceTracker + 5 Hz async loop
+│   │   └── navigation.py          # landmark waypoints (in development)
+│   ├── tests/                     # 200+ pytest cases
+│   └── captured_audio/            # raw PTT WebM blobs for debugging (gitignored)
+├── frontend/                      # Vanilla HTML + JS, no build step
 │   ├── index.html
 │   ├── styles.css
-│   └── js/            # ws_client, media, audio_queue, wakelock, app
-├── backend/           # FastAPI server
-│   ├── main.py
-│   ├── api/           # session, router, frame_handler, audio_handler
-│   ├── services/      # tts_service, speech_service, command_parser, object_allocation, navigation
-│   ├── fsm/           # task_fsm
-│   ├── tests/         # pytest suite
-│   ├── captured_audio/  # raw PTT WebM blobs (gitignored)
-│   └── requirements.txt
+│   └── js/
+│       ├── app.js                 # button wiring + audio prime on Start gesture
+│       ├── ws_client.js
+│       ├── media.js               # getUserMedia + MediaRecorder + 5 FPS loop
+│       ├── audio_queue.js         # persistent primed <audio> for iOS
+│       └── wakelock.js
 ├── docs/
-├── scripts/
+│   ├── protocol.md                # frozen WS contract
+│   └── ...                        # sprint plan + intro PDFs
 └── README.md
 ```
 
-## Prerequisites
+---
 
-- **Python 3.10+** with pip.
-- **ffmpeg** on PATH (Whisper uses it to decode WebM/Opus → PCM).
-  - macOS: `brew install ffmpeg`
-  - Ubuntu/Debian: `sudo apt install ffmpeg`
-  - Windows: download from <https://ffmpeg.org/download.html> or `winget install ffmpeg`
-- **Chrome** (Android, iOS, or desktop) for the frontend.
+## Development
 
-## Run Locally
-
-### Backend
-
-> ⚠️ **Don't put the project inside OneDrive / iCloud / Dropbox.** Sync clients
-> lock files while pip and git try to write them, breaking venv creation and
-> commits. Put the repo somewhere like `C:\Users\<you>\Projects\Lumen` or
-> `~/Projects/Lumen`.
-
-> ⚠️ **Use Python 3.11.** Python 3.13 has rough edges with `openai-whisper`'s
-> torch dependency. We've verified Sprint 1 on Python 3.11.
+### Running tests
 
 ```bash
 cd backend
-
-# Create the venv with Python 3.11 specifically
-python3.11 -m venv .venv          # macOS/Linux
-"C:/Users/Asus/AppData/Local/Programs/Python/Python311/python.exe" -m venv .venv  # Windows
-
-# Activate
-source .venv/Scripts/activate     # Git Bash on Windows
-source .venv/bin/activate         # macOS/Linux
-.venv\Scripts\Activate.ps1        # Windows PowerShell
+python -m pytest tests/ -q
 ```
 
-Then install dependencies. **Do this in two steps because of the openai-whisper
-build gotcha:**
+200+ tests covering: FSM transitions, command parsing (50+ realistic transcriptions including mishearings and synonyms), spatial bucketing (per-class distance), guidance phrase rendering, reach-guidance state machine, hand-pose landmark conversion, YOLO detection parsing, and the Object Allocation `GuidanceTracker` end-to-end with scripted frames and a fake clock.
 
-```bash
-# 1. Pin setuptools<80 in the venv first (openai-whisper's setup.py imports
-#    pkg_resources, which setuptools 80+ removed)
-python -m pip install --upgrade pip
-python -m pip install "setuptools<80" wheel
+The tests deliberately avoid loading the actual heavy ML models (YOLO weights, MediaPipe runtime) - they exercise the pure decision logic with mocks, so the suite runs in under a second.
 
-# 2. Build openai-whisper with --no-build-isolation so it uses the
-#    setuptools<80 we just installed (instead of pip pulling latest)
-python -m pip install --no-build-isolation openai-whisper==20240930
+### Tech stack
 
-# 3. Install the rest (these all ship wheels and install cleanly)
-python -m pip install -r requirements.txt
+| Layer | Choice | Why |
+| --- | --- | --- |
+| Server | FastAPI + uvicorn | Async WebSockets, fast iteration, type hints. |
+| STT | faster-whisper (`base`) | CTranslate2 backend; 4x faster CPU than openai-whisper; no torch dependency; Python 3.13 wheels. |
+| Audio decode | PyAV | Bundles FFmpeg shared libs in the wheel - no system `ffmpeg.exe` on PATH required. |
+| Object detection | YOLOv8n via ultralytics | Smallest of the family (~6 MB), CPU-friendly, COCO-pretrained matches our noun list. |
+| Hand pose | MediaPipe Hands | 21 landmarks, CPU realtime, models bundled in wheel. |
+| TTS | gTTS | Free; we cache MP3s; latency masked by parallel detection. |
+| Command parsing | rapidfuzz | Tolerant of Whisper mishearings, structural matching of prefix + noun. |
+| Frontend | Vanilla HTML/JS, no build | One less moving part. Frontend served same-origin by the backend. |
 
-# 4. Run the server
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
+### Tunneling decisions
 
-> 💡 **If `which python` shows the global Python after activation** (Git Bash
-> quirk), call the venv Python explicitly: `./.venv/Scripts/python.exe -m pip ...`
-> and `./.venv/Scripts/python.exe -m uvicorn main:app --reload`.
+Cloudflare Tunnel quick tunnels are the default recommendation in this README because they're free, no-account, and need no DNS. For an always-on host, the codebase is ready for Azure App Service (B1), a small Linux VM behind Caddy, Azure Container Apps, or Hugging Face Spaces - same backend, same frontend, same WebSocket URL derivation.
 
-The first request that triggers Whisper will download the `whisper-base` model
-(~140 MB) into `~/.cache/whisper/`. This happens once.
+---
 
-### Frontend
+## Roadmap
 
-The frontend is plain HTML+JS — no build step. Serve `frontend/` with any static
-file server. The simplest option:
+- [x] Sprint 1 - voice round-trip working end-to-end (FSM + WS + STT + TTS).
+- [x] Sprint 2 - phone deployment over HTTPS (Cloudflare Tunnel + iOS audio unlock).
+- [x] Sprint 3 - Object Allocation with YOLOv8n.
+- [ ] Sprint 4 - Navigation with landmark waypoints (in development).
+- [x] Sprint 5 - Reach Guidance with MediaPipe Hands.
+- [ ] Sprint 6 - Blindfolded user trials, performance polish, final report.
 
-```bash
-cd frontend
-python -m http.server 8080
-```
+See [`docs/Lumen_Implementation_Plan.pdf`](docs/Lumen_Implementation_Plan.pdf) for the full plan.
 
-Then open <http://localhost:8080> in Chrome.
+---
 
-> **Why localhost?** Sprint 1 doesn't ship HTTPS, and Chrome only allows
-> `getUserMedia` (camera + mic) on `http://localhost` or on `https://`.
-> Phone testing requires HTTPS — that's added in Sprint 2 via `mkcert` + `ngrok`.
+## Author
 
-The frontend connects to `ws://localhost:8000/ws` by default. If you serve the
-backend on a different host/port, edit `frontend/js/app.js`.
+**Ahmad Hamdan** - 1210241 - Birzeit University, ENCS5200.
 
-## Run Tests
+Developed as a team graduation project at Birzeit University's Department of Electrical and Computer Engineering. Architecture, vision pipeline, and reach-guidance work by the author; navigation pipeline by a team-mate.
 
-```bash
-cd backend
-pytest
-```
+## License
 
-Should cover FSM transition rules and the command parser's intent extraction.
-
-## Supported Browsers (v1)
-
-- Chrome on Android — primary target.
-- Chrome on iOS — secondary.
-- Chrome on desktop — for development only.
-
-Safari and Firefox are out of scope for v1.
-
-## Known Limitations (v1)
-
-- Push-to-talk only (no voice activity detection).
-- English only (no Arabic).
-- Foreground browser tab required during active tasks — switching apps or locking
-  the phone ends the task.
-- COCO-pretrained YOLOv8n only — no door/hallway/stairs detection.
-- One concurrent user per server.
-- No reconnection state recovery — WebSocket drop falls back to Idle.
-- No HTTPS in Sprint 1 → no real-phone testing yet (added in Sprint 2).
-
-## Sprint Plan
-
-See [`docs/Lumen_Implementation_Plan.pdf`](docs/Lumen_Implementation_Plan.pdf) for the
-full six-sprint plan. Quick summary:
-
-1. **Sprint 1** (current): vertical slice — voice round-trip working end-to-end.
-2. **Sprint 2**: HTTPS via mkcert+ngrok; phone testing.
-3. **Sprint 3**: Object Allocation task with YOLOv8n (two weeks).
-4. **Sprint 4**: Navigation task with landmark waypoints.
-5. **Sprint 5**: Polish, internal blindfolded trials, report rewrite.
+Academic project - released under the MIT License. See `LICENSE` (to be added) if you want to build on it.
