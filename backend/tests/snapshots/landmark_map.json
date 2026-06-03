@@ -1,0 +1,231 @@
+{
+  "armchair": [
+    "chair"
+  ],
+  "backpack": [
+    "backpack"
+  ],
+  "bag": [
+    "backpack",
+    "handbag",
+    "suitcase"
+  ],
+  "bathroom sink": [
+    "sink"
+  ],
+  "bed": [
+    "bed"
+  ],
+  "bench": [
+    "bench"
+  ],
+  "book": [
+    "book"
+  ],
+  "books": [
+    "book"
+  ],
+  "bottle": [
+    "bottle"
+  ],
+  "bowl": [
+    "bowl"
+  ],
+  "cat": [
+    "cat"
+  ],
+  "cell phone": [
+    "cell phone"
+  ],
+  "chair": [
+    "chair"
+  ],
+  "clock": [
+    "clock"
+  ],
+  "coffee table": [
+    "dining table"
+  ],
+  "computer": [
+    "laptop"
+  ],
+  "container": [
+    "bottle",
+    "cup",
+    "bowl"
+  ],
+  "corridor": [],
+  "couch": [
+    "couch"
+  ],
+  "cup": [
+    "cup"
+  ],
+  "desk": [
+    "dining table"
+  ],
+  "dining table": [
+    "dining table"
+  ],
+  "dog": [
+    "dog"
+  ],
+  "door": [
+    "door"
+  ],
+  "doorway": [
+    "door"
+  ],
+  "entrance": [
+    "door"
+  ],
+  "exit": [
+    "door"
+  ],
+  "flowers": [
+    "vase",
+    "potted plant"
+  ],
+  "freezer": [
+    "refrigerator"
+  ],
+  "fridge": [
+    "refrigerator"
+  ],
+  "gateway": [
+    "door"
+  ],
+  "glass": [
+    "wine glass",
+    "cup"
+  ],
+  "hall": [],
+  "hallway": [],
+  "handbag": [
+    "handbag"
+  ],
+  "keyboard": [
+    "keyboard"
+  ],
+  "kitchen sink": [
+    "sink"
+  ],
+  "kitchen table": [
+    "dining table"
+  ],
+  "laptop": [
+    "laptop"
+  ],
+  "loveseat": [
+    "couch"
+  ],
+  "luggage": [
+    "suitcase"
+  ],
+  "mattress": [
+    "bed"
+  ],
+  "microwave": [
+    "microwave"
+  ],
+  "mobile": [
+    "cell phone"
+  ],
+  "monitor": [
+    "tv",
+    "laptop"
+  ],
+  "mouse": [
+    "mouse"
+  ],
+  "mug": [
+    "cup"
+  ],
+  "oven": [
+    "oven"
+  ],
+  "people": [
+    "person"
+  ],
+  "person": [
+    "person"
+  ],
+  "pet": [
+    "cat",
+    "dog"
+  ],
+  "phone": [
+    "cell phone"
+  ],
+  "plant": [
+    "potted plant"
+  ],
+  "potted plant": [
+    "potted plant"
+  ],
+  "purse": [
+    "handbag"
+  ],
+  "refrigerator": [
+    "refrigerator"
+  ],
+  "remote": [
+    "remote"
+  ],
+  "screen": [
+    "tv",
+    "laptop"
+  ],
+  "seat": [
+    "chair",
+    "couch",
+    "bench"
+  ],
+  "settee": [
+    "couch"
+  ],
+  "sink": [
+    "sink"
+  ],
+  "sofa": [
+    "couch"
+  ],
+  "someone": [
+    "person"
+  ],
+  "staircase": [],
+  "stairs": [],
+  "steps": [],
+  "stove": [
+    "oven"
+  ],
+  "suitcase": [
+    "suitcase"
+  ],
+  "table": [
+    "dining table"
+  ],
+  "television": [
+    "tv"
+  ],
+  "toaster": [
+    "toaster"
+  ],
+  "toilet": [
+    "toilet"
+  ],
+  "tv": [
+    "tv"
+  ],
+  "vase": [
+    "vase"
+  ],
+  "wall": [],
+  "water bottle": [
+    "bottle"
+  ],
+  "window": [],
+  "wine glass": [
+    "wine glass"
+  ]
+}

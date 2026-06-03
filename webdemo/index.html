@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumen M1 — Semantic Arrival (browser demo)</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#0f1115; color:#e8e8e8; margin:0; padding:16px; text-align:center; }
+  h2 { margin:8px 0 14px; }
+  #bar { margin-bottom:12px; }
+  input, button { font-size:16px; padding:7px 12px; margin:4px; border-radius:6px; border:1px solid #444; }
+  input { background:#1b1e26; color:#fff; width:140px; }
+  button { background:#2d6cdf; color:#fff; border:none; cursor:pointer; }
+  button.sec { background:#39404f; }
+  /* The video plays natively (smooth); the canvas is a transparent overlay for boxes only. */
+  #wrap { position:relative; display:inline-block; max-width:100%; line-height:0; }
+  video { display:block; max-width:100%; border-radius:10px; background:#000; }
+  #overlay { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+  #status { margin-top:14px; font-size:18px; min-height:24px; line-height:1.4; }
+  .arrived { color:#41e08a; font-weight:bold; }
+  .hint { color:#9aa3b2; font-size:14px; margin-top:6px; }
+</style>
+</head>
+<body>
+  <h2>Lumen M1 — Semantic Arrival</h2>
+  <div id="bar">
+    <button id="start">Start camera</button>
+    <button id="talk" class="sec">🎤 Hold to talk</button>
+    <span class="hint">goal: <b id="goalLabel">—</b></span>
+  </div>
+  <div id="wrap">
+    <video id="vid" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <div id="status">Press <b>Start camera</b>, then hold <b>🎤 Talk</b> and say e.g. "get me to the kitchen".</div>
+  <div class="hint">Lumen speaks back. Try a fridge / microwave / sink for "kitchen"; a lone sink shouldn't trigger it.</div>
+
+<script>
+const vid = document.getElementById('vid');
+const overlay = document.getElementById('overlay'), octx = overlay.getContext('2d');
+const statusEl = document.getElementById('status'), goalLabel = document.getElementById('goalLabel');
+const cap = document.createElement('canvas'), capctx = cap.getContext('2d');  // offscreen, for sending frames
+let running = false, busy = false, announced = false;
+let latestBoxes = [];
+let currentGoal = '';   // set by voice; detection only runs once we have a goal
+let currentMode = '';   // latest phase from the server (for the terminal transcript)
+let lastSpoken = '';    // de-dupe: don't repeat the same spoken line
+
+// Report each spoken line to the server so it prints a transcript in the terminal.
+function logSpoke(t){
+  try { fetch('/spoke', { method:'POST',
+    headers:{'Content-Type':'application/json','ngrok-skip-browser-warning':'true'},
+    body: JSON.stringify({ text:t, mode: currentMode }) }); } catch(e){}
+}
+function speakNow(t){ try { speechSynthesis.speak(new SpeechSynthesisUtterance(t)); logSpoke(t); } catch(e){} }
+
+// Priority line (phase change / arrival): interrupt whatever's playing and speak.
+function speak(t){ if (!t) return; try { speechSynthesis.cancel(); } catch(e){} lastSpoken = t; speakNow(t); }
+
+// Ambient nudge (scan / slow-down / door countdown): NEVER interrupt — skip if
+// something is already talking, and don't repeat the same line. This is the fix
+// for prompts overriding each other.
+function maybeSpeak(t, priority){
+  if (!t) return;
+  if (priority){ if (t !== lastSpoken) speak(t); return; }
+  if (t === lastSpoken) return;
+  if (speechSynthesis.speaking || speechSynthesis.pending) return;
+  lastSpoken = t; speakNow(t);
+}
+
+// Mobile browsers block speechSynthesis until a user gesture. Call this from a
+// tap so later background prompts (from the detection loop) are allowed to speak.
+let audioUnlocked = false;
+function unlockAudio(){
+  if (audioUnlocked) return;
+  try { speechSynthesis.resume(); speechSynthesis.speak(new SpeechSynthesisUtterance(' ')); } catch(e){}
+  audioUnlocked = true;
+}
+
+async function startCamera(){
+  if (running) return true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{ width:640, height:480, facingMode:{ ideal:'environment' } },  // rear cam on phones
+      audio:false
+    });
+    vid.srcObject = stream; await vid.play();
+    running = true;
+    renderLoop(); detectLoop();
+    return true;
+  } catch(e) { statusEl.textContent = 'Camera error: ' + e.message; return false; }
+}
+document.getElementById('start').onclick = () => { unlockAudio(); currentMode = 'start'; speak('Lumen ready.'); startCamera(); };
+
+// --- VOICE DESTINATION: resolve a spoken phrase to a room goal, confirm by voice ---
+async function setGoalFromText(text){
+  const r = await fetch('/set_goal', {
+    method:'POST',
+    headers:{'Content-Type':'application/json', 'ngrok-skip-browser-warning':'true'},
+    body: JSON.stringify({ text })
+  });
+  const d = await r.json();
+  if (d.goal){
+    currentGoal = d.goal; goalLabel.textContent = d.goal; currentMode = 'goal';
+    announced = false; latestBoxes = []; lastSpoken = '';
+    statusEl.textContent = 'Heard "' + d.heard + '" → goal: ' + d.goal;
+    speak('Looking for the ' + d.goal);
+    await startCamera();
+  } else {
+    currentMode = 'goal';
+    statusEl.textContent = 'I don’t know that room (heard "' + d.heard + '").';
+    speak("Sorry, I don't know that room. Try the kitchen, bathroom, or bedroom.");
+  }
+}
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const talkBtn = document.getElementById('talk');
+if (SR){
+  const recog = new SR();
+  recog.lang = 'en-US'; recog.interimResults = false; recog.maxAlternatives = 1;
+  recog.onresult = (e) => setGoalFromText(e.results[0][0].transcript);
+  recog.onerror  = (e) => { statusEl.textContent = 'Speech error: ' + e.error; talkBtn.textContent = '🎤 Hold to talk'; };
+  recog.onend    = ()  => { talkBtn.textContent = '🎤 Hold to talk'; };
+  talkBtn.onpointerdown = () => { unlockAudio(); try { recog.start(); talkBtn.textContent = '🎤 Listening…'; } catch(e){} };
+  talkBtn.onpointerup   = () => { try { recog.stop(); } catch(e){} };
+} else {
+  // Fallback: browsers without SpeechRecognition (e.g. iOS Safari) — type it instead.
+  talkBtn.textContent = '⌨️ Type goal';
+  talkBtn.onclick = () => { unlockAudio(); const t = window.prompt('Say/type destination:', 'get me to the kitchen'); if (t) setGoalFromText(t); };
+}
+
+// --- DISPLAY: redraw the box overlay every animation frame so it stays glued
+// to the smooth native <video> underneath (no flashing). ---
+function renderLoop(){
+  if (!running) return;
+  const W = vid.clientWidth, H = vid.clientHeight;
+  if (W && H) {
+    if (overlay.width !== W || overlay.height !== H) { overlay.width = W; overlay.height = H; }
+    octx.clearRect(0, 0, W, H);
+    for (const b of latestBoxes) {
+      const x1=b.box[0]*W, y1=b.box[1]*H, x2=b.box[2]*W, y2=b.box[3]*H;
+      // door = orange, goal indicator = green, everything else = grey
+      octx.lineWidth = (b.door || b.indicator) ? 3 : 1.5;
+      octx.strokeStyle = b.door ? '#f5a623' : (b.indicator ? '#41e08a' : '#8a93a3');
+      octx.strokeRect(x1, y1, x2-x1, y2-y1);
+      octx.fillStyle = octx.strokeStyle; octx.font = '16px sans-serif';
+      octx.fillText(b.cls + ' ' + b.conf, x1+3, Math.max(15, y1-4));
+    }
+  }
+  requestAnimationFrame(renderLoop);
+}
+
+// --- DETECTION: background loop, only runs once a goal is set ---
+async function detectLoop(){
+  while (running){
+    if (!busy && currentGoal && vid.videoWidth) await detectOnce();
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+async function detectOnce(){
+  busy = true;
+  try {
+    // Downscale to <=640 wide before sending: smaller upload = lower latency over
+    // the tunnel, and the model runs at 640 anyway.
+    const scale = Math.min(1, 640 / vid.videoWidth);
+    const w = Math.round(vid.videoWidth * scale), h = Math.round(vid.videoHeight * scale);
+    cap.width = w; cap.height = h;
+    capctx.drawImage(vid, 0, 0, w, h);
+    const dataUrl = cap.toDataURL('image/jpeg', 0.6);
+    const r = await fetch('/detect', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'ngrok-skip-browser-warning':'true'},
+      body: JSON.stringify({ goal: currentGoal, image: dataUrl })
+    });
+    const d = await r.json();
+    latestBoxes = d.boxes || [];
+    currentMode = d.mode || currentMode;
+    if (d.arrived){
+      statusEl.innerHTML = '<span class="arrived">ARRIVED — ' + d.phrase + '</span>';
+      if (!announced){ speak(d.phrase); announced = true; }   // arrival = priority
+    } else {
+      // Phase changes interrupt; ambient nudges don't (see maybeSpeak).
+      if (d.guidance) maybeSpeak(d.guidance, d.priority);
+      const seen = (d.matched && d.matched.length) ? d.matched.join(', ') : 'none';
+      const line = d.guidance || ('Looking for ' + (d.goal || currentGoal) + '…');
+      statusEl.textContent = '[' + (d.mode || '') + '] 🔊 ' + line + '  (confirmed: ' + seen + ')';
+    }
+  } catch(e) { statusEl.textContent = 'Error: ' + e.message; }
+  busy = false;
+}
+</script>
+</body>
+</html>

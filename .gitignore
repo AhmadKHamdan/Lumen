@@ -1,0 +1,29 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# ---- Model weights (large binaries) ----
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# ---- Datasets (large) ----
+door_training/doors_dataset/
+door_training/doors_dataset.zip
+door_training/converted/
+*.zip
+
+# ---- Training / inference output ----
+runs/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
