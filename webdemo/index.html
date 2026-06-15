@@ -33,12 +33,16 @@
     <canvas id="overlay"></canvas>
   </div>
   <div id="status">Press <b>Start camera</b>, then hold <b>🎤 Talk</b> and say e.g. "get me to the kitchen".</div>
-  <div class="hint">Lumen speaks back. Try a fridge / microwave / sink for "kitchen"; a lone sink shouldn't trigger it.</div>
+  <div class="hint" id="tip">Lumen speaks back. Try a fridge / microwave / sink for "kitchen"; a lone sink shouldn't trigger it.</div>
 
 <script>
 const vid = document.getElementById('vid');
 const overlay = document.getElementById('overlay'), octx = overlay.getContext('2d');
 const statusEl = document.getElementById('status'), goalLabel = document.getElementById('goalLabel');
+// Demo mode: hide detection boxes and on-screen text — the audience only sees the
+// clean camera view and hears the voice. Flip to true when debugging perception.
+const SHOW_DEBUG_UI = false;
+function setStatus(html){ if (SHOW_DEBUG_UI) statusEl.innerHTML = html; }
 const cap = document.createElement('canvas'), capctx = cap.getContext('2d');  // offscreen, for sending frames
 let running = false, busy = false, announced = false;
 let latestBoxes = [];
@@ -77,6 +81,29 @@ function unlockAudio(){
   audioUnlocked = true;
 }
 
+// Phone compass heading (degrees, clockwise) for the 360 sectorized scan.
+let currentHeading = null;
+let orientOn = false;
+function startOrientation(){
+  if (orientOn) return; orientOn = true;
+  window.addEventListener('deviceorientation', (e) => {
+    if (typeof e.webkitCompassHeading === 'number') currentHeading = e.webkitCompassHeading; // iOS: true heading, clockwise
+    else if (typeof e.alpha === 'number') currentHeading = (360 - e.alpha) % 360;            // others: alpha is CCW -> make CW
+  }, true);
+}
+async function enableOrientation(){
+  try {
+    // iOS 13+ needs explicit permission, requested from a user gesture.
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function'){
+      const p = await DeviceOrientationEvent.requestPermission();
+      if (p === 'granted') startOrientation();
+    } else {
+      startOrientation();  // Android/desktop: no permission gate
+    }
+  } catch(e){ /* no compass -> server falls back to a single-pass scan */ }
+}
+
 async function startCamera(){
   if (running) return true;
   try {
@@ -90,7 +117,11 @@ async function startCamera(){
     return true;
   } catch(e) { statusEl.textContent = 'Camera error: ' + e.message; return false; }
 }
-document.getElementById('start').onclick = () => { unlockAudio(); currentMode = 'start'; speak('Lumen ready.'); startCamera(); };
+document.getElementById('start').onclick = () => {
+  unlockAudio(); enableOrientation(); currentMode = 'start'; speak('Lumen ready.');
+  if (!SHOW_DEBUG_UI){ statusEl.textContent = ''; document.getElementById('tip').style.display = 'none'; }
+  startCamera();
+};
 
 // --- VOICE DESTINATION: resolve a spoken phrase to a room goal, confirm by voice ---
 async function setGoalFromText(text){
@@ -103,12 +134,13 @@ async function setGoalFromText(text){
   if (d.goal){
     currentGoal = d.goal; goalLabel.textContent = d.goal; currentMode = 'goal';
     announced = false; latestBoxes = []; lastSpoken = '';
-    statusEl.textContent = 'Heard "' + d.heard + '" → goal: ' + d.goal;
-    speak('Looking for the ' + d.goal);
+    setStatus('Heard "' + d.heard + '" → goal: ' + d.goal);
+    // No speech here: the server's first guidance line opens with "Looking for the
+    // kitchen. Let's scan..." as ONE utterance, so nothing gets cut off.
     await startCamera();
   } else {
     currentMode = 'goal';
-    statusEl.textContent = 'I don’t know that room (heard "' + d.heard + '").';
+    setStatus('I don’t know that room (heard "' + d.heard + '").');
     speak("Sorry, I don't know that room. Try the kitchen, bathroom, or bedroom.");
   }
 }
@@ -121,12 +153,12 @@ if (SR){
   recog.onresult = (e) => setGoalFromText(e.results[0][0].transcript);
   recog.onerror  = (e) => { statusEl.textContent = 'Speech error: ' + e.error; talkBtn.textContent = '🎤 Hold to talk'; };
   recog.onend    = ()  => { talkBtn.textContent = '🎤 Hold to talk'; };
-  talkBtn.onpointerdown = () => { unlockAudio(); try { recog.start(); talkBtn.textContent = '🎤 Listening…'; } catch(e){} };
+  talkBtn.onpointerdown = () => { unlockAudio(); enableOrientation(); try { recog.start(); talkBtn.textContent = '🎤 Listening…'; } catch(e){} };
   talkBtn.onpointerup   = () => { try { recog.stop(); } catch(e){} };
 } else {
   // Fallback: browsers without SpeechRecognition (e.g. iOS Safari) — type it instead.
   talkBtn.textContent = '⌨️ Type goal';
-  talkBtn.onclick = () => { unlockAudio(); const t = window.prompt('Say/type destination:', 'get me to the kitchen'); if (t) setGoalFromText(t); };
+  talkBtn.onclick = () => { unlockAudio(); enableOrientation(); const t = window.prompt('Say/type destination:', 'get me to the kitchen'); if (t) setGoalFromText(t); };
 }
 
 // --- DISPLAY: redraw the box overlay every animation frame so it stays glued
@@ -137,14 +169,16 @@ function renderLoop(){
   if (W && H) {
     if (overlay.width !== W || overlay.height !== H) { overlay.width = W; overlay.height = H; }
     octx.clearRect(0, 0, W, H);
-    for (const b of latestBoxes) {
-      const x1=b.box[0]*W, y1=b.box[1]*H, x2=b.box[2]*W, y2=b.box[3]*H;
-      // door = orange, goal indicator = green, everything else = grey
-      octx.lineWidth = (b.door || b.indicator) ? 3 : 1.5;
-      octx.strokeStyle = b.door ? '#f5a623' : (b.indicator ? '#41e08a' : '#8a93a3');
-      octx.strokeRect(x1, y1, x2-x1, y2-y1);
-      octx.fillStyle = octx.strokeStyle; octx.font = '16px sans-serif';
-      octx.fillText(b.cls + ' ' + b.conf, x1+3, Math.max(15, y1-4));
+    if (SHOW_DEBUG_UI) {
+      for (const b of latestBoxes) {
+        const x1=b.box[0]*W, y1=b.box[1]*H, x2=b.box[2]*W, y2=b.box[3]*H;
+        // door = orange, goal indicator = green, everything else = grey
+        octx.lineWidth = (b.door || b.indicator) ? 3 : 1.5;
+        octx.strokeStyle = b.door ? '#f5a623' : (b.indicator ? '#41e08a' : '#8a93a3');
+        octx.strokeRect(x1, y1, x2-x1, y2-y1);
+        octx.fillStyle = octx.strokeStyle; octx.font = '16px sans-serif';
+        octx.fillText(b.cls + ' ' + b.conf, x1+3, Math.max(15, y1-4));
+      }
     }
   }
   requestAnimationFrame(renderLoop);
@@ -170,20 +204,20 @@ async function detectOnce(){
     const r = await fetch('/detect', {
       method:'POST',
       headers:{'Content-Type':'application/json', 'ngrok-skip-browser-warning':'true'},
-      body: JSON.stringify({ goal: currentGoal, image: dataUrl })
+      body: JSON.stringify({ goal: currentGoal, image: dataUrl, heading: currentHeading })
     });
     const d = await r.json();
     latestBoxes = d.boxes || [];
     currentMode = d.mode || currentMode;
     if (d.arrived){
-      statusEl.innerHTML = '<span class="arrived">ARRIVED — ' + d.phrase + '</span>';
+      setStatus('<span class="arrived">ARRIVED — ' + d.phrase + '</span>');
       if (!announced){ speak(d.phrase); announced = true; }   // arrival = priority
     } else {
       // Phase changes interrupt; ambient nudges don't (see maybeSpeak).
       if (d.guidance) maybeSpeak(d.guidance, d.priority);
       const seen = (d.matched && d.matched.length) ? d.matched.join(', ') : 'none';
       const line = d.guidance || ('Looking for ' + (d.goal || currentGoal) + '…');
-      statusEl.textContent = '[' + (d.mode || '') + '] 🔊 ' + line + '  (confirmed: ' + seen + ')';
+      setStatus('[' + (d.mode || '') + '] 🔊 ' + line + '  (confirmed: ' + seen + ')');
     }
   } catch(e) { statusEl.textContent = 'Error: ' + e.message; }
   busy = false;

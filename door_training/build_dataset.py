@@ -54,14 +54,14 @@ def main() -> None:
         f"path: {out.resolve()}\n"
         f"train: images/train\n"
         f"val: images/val\n"
-        f"nc: 1\n"
-        f"names: ['door']\n"
+        f"nc: 4\n"
+        f"names: ['door', 'handle', 'cabinet door', 'refrigerator door']\n"
     )
 
     print(f"Merged {len(pairs)} pairs -> {out}  (train={len(pairs) - n_val}, val={n_val})")
-    print("Now train (4 GB GPU -> batch 8):")
-    print(f"  yolo detect train model=yolov8n.pt data={out / 'data.yaml'} "
-          f"epochs=100 imgsz=640 batch=8 device=0 patience=20 name=door_yolov8n")
+    print("Now train (4 GB GPU -> yolov8s, batch 8; drop to batch 4 if it OOMs):")
+    print(f"  yolo detect train model=yolov8s.pt data={out / 'data.yaml'} "
+          f"epochs=100 imgsz=640 batch=8 device=0 patience=20 name=door_yolov8s_4cls")
 
 
 if __name__ == "__main__":
