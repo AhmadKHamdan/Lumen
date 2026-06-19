@@ -25,6 +25,7 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from PIL import Image
 from pydantic import BaseModel
 
 from navigation import resolve_goal, indicators_for, evaluate_arrival, arrival_phrase
@@ -106,7 +107,22 @@ if _verify_path.exists():
     print("Loading 4-class door verifier...")
     _verify_model = YOLO(str(_verify_path))
 
-# Warm up both models so the FIRST real frame isn't stalled by CUDA/kernel init
+# Phase B obstacle layer: monocular depth (Depth Anything V2 Small). Runs ONLY while
+# walking to a door, and catches UNNAMED clutter (clothes piles, boxes, bins) that the
+# YOLO class layer is blind to. Optional — if it can't load, Phase A still runs.
+_depth_pipe = None
+try:
+    import torch  # noqa: E402
+    from transformers import pipeline as _hf_pipeline  # noqa: E402
+    print("Loading depth model (Depth Anything V2 Small)...")
+    _depth_pipe = _hf_pipeline("depth-estimation",
+                               model="depth-anything/Depth-Anything-V2-Small-hf",
+                               device=0 if torch.cuda.is_available() else -1)
+except Exception as e:  # noqa: BLE001 — any failure -> degrade to YOLO-only obstacles
+    print(f"Depth model unavailable ({type(e).__name__}); obstacle watchdog will use "
+          "YOLO classes only. To enable it: pip install transformers torch")
+
+# Warm up models so the FIRST real frame isn't stalled by CUDA/kernel init
 # (that lag is the long silence at the start of the demo).
 print("Warming up models...")
 _warm = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -114,6 +130,8 @@ _model.predict(_warm, verbose=False)
 _door_model.predict(_warm, verbose=False)
 if _verify_model is not None:
     _verify_model.predict(_warm, verbose=False)
+if _depth_pipe is not None:
+    _depth_pipe(Image.fromarray(np.zeros((288, 384, 3), dtype=np.uint8)))
 print("Ready.")
 
 _door_hist: deque = deque(maxlen=WINDOW)  # (region, distance) of strongest door, per frame
@@ -149,7 +167,8 @@ _state = {"goal": None, "mode": "discover", "scan_age": 0,
           "door_bearings": [], "ind_bearings": [],
           "target_heading": None, "target_kind": None,
           "skip_scan_prompt": False, "last_door_dist": None,
-          "approach_frac": 0.0, "near_age": 0}
+          "approach_frac": 0.0, "near_age": 0,
+          "obst_hits": 0, "obst_clear": 0, "obst_cool": 0, "obst_active": False}
 
 REPROMPT = 12          # cycles between spoken re-prompts (~4 s)
 ROOM_SCAN_CYCLES = 30  # frames for the go_indicator re-confirm before giving up
@@ -184,6 +203,35 @@ APPROACH_FRAC = 0.5    # ...or the confirmed door grew to this frame-height frac
 # latch forever (the user already walked through!). Cap how long the latch can hold
 # without a properly confirmed door before we infer the transit happened.
 NEAR_HOLD_MAX = 20     # ~7 s at ~3 fps
+
+# --- Obstacle watchdog (Phase A: YOLO classes; the depth tripwire is Phase B) ---
+# While the user WALKS to a door (go_door), warn about known objects standing in the
+# lower-centre "walking lane". COCO can't see unnamed clutter (clothes piles, boxes)
+# -> that's what Phase B's depth model adds; this is the named-object safety layer.
+OBSTACLE_CLASSES = {"person", "chair", "couch", "bed", "dining table", "potted plant",
+                    "backpack", "handbag", "suitcase", "bench", "tv", "dog", "cat"}
+_OBST_NAMES = {"dining table": "table", "potted plant": "plant", "tv": "TV"}  # out loud
+CORRIDOR_X = (0.30, 0.70)  # central horizontal band = the lane the user walks into
+OBST_BOTTOM_FRAC = 0.62    # box bottom must reach below this (near the floor / close)
+OBST_MIN_H_FRAC = 0.18     # ignore tiny, far boxes
+OBST_MIN_OVERLAP = 0.04    # min lane overlap (fraction of width) to count as "in the way"
+OBST_HITS = 2              # consecutive frames before the FIRST alert (kills flicker)
+OBST_CLEAR_HITS = 2        # consecutive clear frames before declaring the path clear
+OBST_REPROMPT = 9          # frames between repeated warnings while still blocked (~3 s)
+
+# --- Phase B: depth tripwire (class-agnostic). We can't trust an absolute near/far
+# convention from the model, so each frame self-calibrates: the bottom strip (floor at
+# the feet) anchors "near", the top-centre strip anchors "far", and every region is
+# scored 0 (far) .. 1 (near) between them. An obstacle = the centre lane reads much
+# nearer than the side floor at the same height. Sign-agnostic and scale-free. ---
+DEPTH_INPUT_W = 384        # downscale width for the depth net (~75 ms vs ~150 ms)
+DEPTH_LANE_ROWS = (0.45, 0.85)   # mid-lower rows = the strip just ahead of the feet
+DEPTH_NEAR_ROWS = (0.88, 1.00)   # bottom strip = floor at the feet (near anchor)
+DEPTH_FAR_ROWS = (0.00, 0.30)    # top strip ahead (far anchor)
+DEPTH_FLAT_MIN = 8.0       # if near/far anchors differ by less than this (of 255), the
+                           # scene is too flat to judge (e.g. facing a near wall) -> skip
+DEPTH_REL_MARGIN = 0.18    # a lane pixel this much nearer than its row's floor = intrusion
+DEPTH_AREA_FRAC = 0.12     # this fraction of the centre lane intruding = a real obstacle
 
 
 def _reset_scan_fields() -> None:
@@ -451,6 +499,10 @@ def _enter_go_door() -> None:
     _state["last_door_dist"] = None  # fresh approach: no stale "we were close" memory
     _state["approach_frac"] = 0.0
     _state["near_age"] = 0
+    _state["obst_hits"] = 0      # fresh approach -> fresh obstacle debounce
+    _state["obst_clear"] = 0
+    _state["obst_cool"] = 0
+    _state["obst_active"] = False
 
 
 def _find_door_phrases() -> list[str]:
@@ -460,6 +512,116 @@ def _find_door_phrases() -> list[str]:
         "Still looking for a door. Keep moving the camera around the room.",
         "No door yet — keep scanning the walls slowly.",
     ]
+
+
+def _depth_map(img):
+    """Relative depth map (PIL-normalized 0..255, H'xW') for a frame, or None.
+    Downscaled for speed; orientation matches the input."""
+    if _depth_pipe is None:
+        return None
+    dw = DEPTH_INPUT_W
+    dh = max(1, int(round(dw * img.shape[0] / img.shape[1])))
+    small = cv2.resize(img, (dw, dh))
+    pim = Image.fromarray(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+    return np.asarray(_depth_pipe(pim)["depth"], dtype=np.float32)
+
+
+def _depth_tripwire(d):
+    """Class-agnostic obstacle check from a depth map. Returns the side to step toward
+    ('left'/'right') if something sits close in the walking lane, else None.
+
+    Self-calibrating per frame so the model's near/far sign never matters: the bottom
+    strip (floor at the feet) and the top-centre strip anchor near=1 / far=0, then each
+    lane pixel is compared to the floor at ITS OWN row (the floor recedes up the frame).
+    A patch of the centre lane that is much nearer than its row's side-floor is an
+    obstacle — works even when it covers only part of the lane."""
+    if d is None:
+        return None
+    H, W = d.shape
+    r0, r1 = int(DEPTH_LANE_ROWS[0] * H), int(DEPTH_LANE_ROWS[1] * H)
+    near_ref = float(np.median(d[int(DEPTH_NEAR_ROWS[0] * H):int(DEPTH_NEAR_ROWS[1] * H), :]))
+    far_ref = float(np.median(d[int(DEPTH_FAR_ROWS[0] * H):int(DEPTH_FAR_ROWS[1] * H),
+                                int(0.30 * W):int(0.70 * W)]))
+    denom = near_ref - far_ref
+    if abs(denom) < DEPTH_FLAT_MIN:
+        return None  # too flat to judge (e.g. facing a near blank wall)
+
+    lane = (d[r0:r1] - far_ref) / denom          # nearness map: 0 far .. 1 near
+    cL, cR = int(CORRIDOR_X[0] * W), int(CORRIDOR_X[1] * W)
+    sL, sR = int(0.22 * W), int(0.78 * W)
+    side_floor = np.median(np.concatenate([lane[:, :sL], lane[:, sR:]], axis=1),
+                           axis=1, keepdims=True)  # per-row floor baseline
+    centre = lane[:, cL:cR]
+    intrude = (centre - side_floor) > DEPTH_REL_MARGIN  # nearer than the floor at that row
+    frac = float(intrude.mean())
+    if DOOR_DEBUG:
+        print(f"[depth] near={near_ref:.0f} far={far_ref:.0f} intrude={frac:.2f}", flush=True)
+    if frac < DEPTH_AREA_FRAC:
+        return None
+    half = intrude.shape[1] // 2  # step away from the half where the intrusion sits
+    return "right" if intrude[:, :half].sum() > intrude[:, half:].sum() else "left"
+
+
+def _obstacle_in_corridor(obstacle_dets, w: int, h: int):
+    """Most intrusive known obstacle standing in the walking lane, or None.
+    The lane is the lower-centre band of the frame (the strip the user walks into).
+    Returns (class_name, center_x_frac) of the worst offender."""
+    lo, hi = CORRIDOR_X
+    best = None
+    for cls, _conf, (x1, y1, x2, y2) in obstacle_dets:
+        if (y2 - y1) / h < OBST_MIN_H_FRAC or y2 / h < OBST_BOTTOM_FRAC:
+            continue  # too small/far, or sitting high (not on the floor ahead)
+        overlap = max(0.0, min(x2, hi * w) - max(x1, lo * w)) / w
+        if overlap < OBST_MIN_OVERLAP:
+            continue  # off to the side -> the user won't walk into it
+        score = overlap * ((y2 - y1) / h)  # more lane coverage + taller (closer) = worse
+        if best is None or score > best[0]:
+            best = (score, cls, ((x1 + x2) / 2) / w)
+    return None if best is None else (best[1], best[2])
+
+
+def _obstacle_watchdog(obstacle_dets, depth_map, w: int, h: int):
+    """Debounced corridor watchdog fusing two layers: the YOLO class layer (names the
+    object) and the depth tripwire (catches anything, named or not). Returns
+    (guidance, priority, blocking). blocking=True means a confirmed obstacle is in the
+    lane now, so the caller suppresses door guidance. Speaks on first confirm, again
+    every OBST_REPROMPT frames while still blocked, and once when the path clears."""
+    yolo = _obstacle_in_corridor(obstacle_dets, w, h)   # (cls, cx) or None
+    if yolo is not None:
+        cls, cx = yolo
+        name = _OBST_NAMES.get(cls, cls)
+        art = "an" if name[:1].lower() in "aeiou" else "a"
+        what, side = f"{art} {name}", ("right" if cx < 0.5 else "left")
+    else:
+        dside = _depth_tripwire(depth_map)              # 'left'/'right' or None
+        what, side = ("something", dside) if dside else (None, None)
+
+    if what is not None:
+        _state["obst_clear"] = 0
+        _state["obst_hits"] += 1
+        if _state["obst_hits"] < OBST_HITS:
+            return "", False, False  # not confirmed yet -> let door guidance run
+        if DOOR_DEBUG:
+            print(f"[obst] {what} -> blocking, step {side}", flush=True)
+        if not _state["obst_active"]:
+            _state["obst_active"] = True
+            _state["obst_cool"] = OBST_REPROMPT
+            return f"Stop. There's {what} in your way. Step to your {side}.", True, True
+        if _state["obst_cool"] <= 0:
+            _state["obst_cool"] = OBST_REPROMPT
+            return f"Still blocked. Step to your {side}, slowly.", True, True
+        _state["obst_cool"] -= 1
+        return "", False, True  # blocking, mid-cooldown -> stay silent this frame
+    # corridor clear this frame
+    _state["obst_hits"] = 0
+    if _state["obst_active"]:
+        _state["obst_clear"] += 1
+        if _state["obst_clear"] >= OBST_CLEAR_HITS:
+            _state["obst_active"] = False
+            _state["obst_clear"] = 0
+            return "Okay, the way ahead is clear.", True, False
+        return "", False, True  # brief grace before resuming door directions
+    return "", False, False
 
 
 def _door_region(cx: float) -> str:
@@ -610,8 +772,12 @@ def detect(frame: Frame) -> dict:
 
     # COCO indicator model (class-filtered to this goal's indicators -> faster, and
     # the overlay stays clean). Collect raw detections; we resolve door<->object
-    # overlaps before committing them.
-    wanted_ids = [_name_to_id[c] for c in indicators if c in _name_to_id]
+    # overlaps before committing them. While walking to a door we ALSO request the
+    # obstacle classes so the corridor watchdog can see chairs/people/etc. in the path.
+    wanted = set(indicators)
+    if _state["mode"] == "go_door":
+        wanted |= OBSTACLE_CLASSES
+    wanted_ids = [_name_to_id[c] for c in wanted if c in _name_to_id]
     res = _model.predict(img, verbose=False, conf=CONF, classes=wanted_ids or None)[0]
     obj_dets = []  # (cls_name, conf, [x1,y1,x2,y2])
     for b in res.boxes:
@@ -631,6 +797,11 @@ def detect(frame: Frame) -> dict:
                           "-> reject (whole-frame latch)", flush=True)
                 continue
         obj_dets.append((ocls, oconf, oxy))
+
+    # Obstacle watchdog input: known obstacle classes seen this frame, captured BEFORE
+    # door de-confusion so a chair overlapping the doorway isn't suppressed away.
+    obstacle_dets = ([d for d in obj_dets if d[0] in OBSTACLE_CLASSES]
+                     if _state["mode"] == "go_door" else [])
 
     # Door model (single-class 'door' today; 4-class compatible). 'door' = navigable;
     # 'refrigerator door' is folded in as a fridge sighting; handle/cabinet ignored.
@@ -846,6 +1017,19 @@ def detect(frame: Frame) -> dict:
         _state["gone"] = 0  # door still in view but not close — not a transit
         _state["near_age"] = 0
 
+    # --- Obstacle watchdog: only while WALKING up to a door (not once we're at it,
+    # where the door panel itself fills the lane). Off-walk, reset the debounce so the
+    # next approach starts clean. ---
+    obst_guidance, obst_priority, obst_blocking = "", False, False
+    if _state["mode"] == "go_door" and not _state["near_latch"]:
+        depth_map = _depth_map(img)  # None if the depth model didn't load (YOLO-only)
+        obst_guidance, obst_priority, obst_blocking = _obstacle_watchdog(
+            obstacle_dets, depth_map, w, h)
+    else:
+        _state["obst_hits"] = 0
+        _state["obst_clear"] = 0
+        _state["obst_active"] = False
+
     result = evaluate_arrival(goal, confirmed)
     matched = result["matched_primary"] + result["matched_secondary"]
     indicator_ok = result["arrived"]  # >=1 primary or >=2 secondary, accumulated
@@ -1008,7 +1192,11 @@ def detect(frame: Frame) -> dict:
         pass  # journey complete — arrival is reported via the arrived/phrase fields below
 
     else:  # go_door — Pass 2b: door-only concern.
-        if just_near:
+        if obst_blocking or obst_guidance:
+            # Safety first: an obstacle in the walking lane overrides door guidance
+            # (and a "path is clear" line gets spoken before door directions resume).
+            guidance, priority = obst_guidance, obst_priority
+        elif just_near:
             guidance = "You're right at the door. Reach out, open it, and walk through."
             priority = True
         elif _state["near_latch"] and not door_confirmed:

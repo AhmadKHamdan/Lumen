@@ -15,12 +15,14 @@ env/
 
 # ---- Datasets (large) ----
 door_training/doors_dataset/
+door_training/doors_dataset_4cls/
 door_training/doors_dataset.zip
 door_training/converted/
 *.zip
 
 # ---- Training / inference output ----
 runs/
+door_training/val_out.txt
 
 # ---- OS / editor ----
 .DS_Store
