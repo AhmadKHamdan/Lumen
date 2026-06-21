@@ -12,6 +12,7 @@ ENV/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ipynb_checkpoints/
 
 # Environment
 .env
@@ -26,6 +27,9 @@ backend/captured_audio/*
 
 # ML model weights (auto-downloaded by ultralytics on first detect)
 *.pt
+*.pth
+*.onnx
+*.engine
 backend/yolov8n.pt
 
 # Frontend
@@ -53,3 +57,32 @@ logs/
 *.pem
 *.key
 *.crt
+
+# ---- Navigation exploration prototype (webdemo) ----
+# Door-training datasets (large)
+door_training/doors_dataset/
+door_training/doors_dataset_4cls/
+door_training/doors_dataset.zip
+door_training/converted/
+*.zip
+# Training / inference output
+runs/
+door_training/val_out.txt
+
+# ---- Trained models the demo REQUIRES (exceptions to *.pt / runs/ above, so a
+#      fresh clone is self-sufficient and the demo runs out of the box) ----
+# The single-class door detector at the repo root:
+!/best.pt
+# The 4-class door verifier lives under an ignored runs/ tree, so we must re-include
+# each directory on its path before we can re-include the file itself (git won't
+# look inside an excluded directory). Re-include the dir, re-exclude its contents,
+# then drill down — so ONLY this one weight file comes back, not the whole run.
+!door_training/runs/
+door_training/runs/*
+!door_training/runs/detect/
+door_training/runs/detect/*
+!door_training/runs/detect/door_yolov8s_4cls/
+door_training/runs/detect/door_yolov8s_4cls/*
+!door_training/runs/detect/door_yolov8s_4cls/weights/
+door_training/runs/detect/door_yolov8s_4cls/weights/*
+!door_training/runs/detect/door_yolov8s_4cls/weights/best.pt
