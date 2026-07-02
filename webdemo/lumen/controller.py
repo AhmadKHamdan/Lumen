@@ -16,9 +16,9 @@ from __future__ import annotations
 from collections import Counter
 
 from .config import *  # noqa: F401,F403 — all tuning constants, referenced unqualified
-from .goals import arrival_phrase, evaluate_arrival, resolve_goal
+from .goals import _article, _display, arrival_phrase, evaluate_arrival, resolve_goal
 from .geometry import (_cluster_bearings, _cluster_doors, _direction, _signed_from_ref,
-                       _track_turn, _turn_to)
+                       _signed_from_ref_deg, _track_turn, _turn_to)
 from .state import (_enter_discover, _enter_face_target, _enter_go_door,
                     _enter_go_indicator, _scan_counts, _state)
 
@@ -29,28 +29,41 @@ def _steps_word(n: int) -> str:
     return "step" if n == 1 else "steps"
 
 
-def _door_phrase(region: str, dist_m: float | None) -> str:
-    """Spoken door call-out: bearing + step distance + a tactile hand cue.
-    Within HAND_REACH_STEPS we ask the user to reach out now; farther away we tell
-    them how many steps to walk before reaching out to feel for the door."""
-    # Definite phrasing on purpose: by the time this speaks, the door has been
-    # confirmed — "The door is", never "There's a door" (which sounds like a guess).
+def _door_locate_phrase(region: str, dist_m: float | None) -> str:
+    """WHERE the door is: bearing + step distance. Definite phrasing on purpose — by
+    the time this speaks, the door has been confirmed: 'The door is', never 'There's
+    a door' (which sounds like a guess)."""
     if dist_m is not None and dist_m < 1.0:
-        return ("The door is right in front of you. Reach out with your hand to find it."
-                if region == "ahead"
-                else f"The door is {region}, right next to you. Reach out with your hand to find it.")
+        return ("The door is right in front of you." if region == "ahead"
+                else f"The door is {region}, right next to you.")
     if dist_m is None:
         return f"The door is {region}."
-
     steps = max(1, round(dist_m / STEP_LENGTH_M))
     unit = _steps_word(steps)
-    base = (f"The door is about {steps} {unit} ahead." if region == "ahead"
+    return (f"The door is about {steps} {unit} ahead." if region == "ahead"
             else f"The door is {region}, about {steps} {unit} away.")
 
+
+def _door_go_phrase(dist_m: float | None) -> str:
+    """HOW to get there: walking instruction + the tactile hand cue. Spoken only
+    AFTER the path check comes back clear (or after an obstacle clears)."""
+    if dist_m is None:
+        return "Walk forward slowly, and reach out with your hand to find the door."
+    steps = max(1, round(dist_m / STEP_LENGTH_M))
+    if dist_m < 1.0:
+        return "Reach out with your hand to find it."
     if steps <= HAND_REACH_STEPS:
-        return base + " You're close — reach out with your hand to find it."
+        return (f"Walk about {steps} {_steps_word(steps)}, and reach out with "
+                "your hand to find it.")
     remaining = steps - HAND_REACH_STEPS
-    return base + f" Walk forward, and after about {remaining} {_steps_word(remaining)} reach out with your hand."
+    return (f"Walk forward, and after about {remaining} {_steps_word(remaining)} "
+            "reach out with your hand.")
+
+
+def _door_phrase(region: str, dist_m: float | None) -> str:
+    """Full call-out (where + how) — used when the path is already known clear,
+    e.g. re-orienting right after an obstacle episode ends."""
+    return _door_locate_phrase(region, dist_m) + " " + _door_go_phrase(dist_m)
 
 
 def _find_door_phrases() -> list[str]:
@@ -114,8 +127,10 @@ def _scan_summary(goal: str) -> tuple[str, int]:
         for c, n in counts.items():
             if c != "door":
                 dir_counts[(c, where)] = dir_counts.get((c, where), 0) + n
-    items += [f"a {c} {where}" for (c, where), n in dir_counts.items()
-              if n >= OBJ_MIN_SIGHTINGS]
+    # Natural speech: "a fridge", "an oven" — same display names + articles the
+    # arrival line uses, instead of raw COCO class names ("a refrigerator", "a oven").
+    items += [f"{_article(_display(c))} {_display(c)} {where}"
+              for (c, where), n in dir_counts.items() if n >= OBJ_MIN_SIGHTINGS]
 
     if not items:
         return f"I scanned the whole room but didn't find the {goal} or a door.", 0
@@ -142,30 +157,50 @@ def _finish_discover(goal: str, indicator_ok: bool, confirm_start: bool = False)
         # Spoken ONLY when the compass verified the return to the start direction —
         # so every direction in the summary is true of where the user faces RIGHT NOW.
         summary = "You're back where you started — scan complete. " + summary.removeprefix("Scan complete. ")
-    if indicator_ok:
-        # Branch (a) — ALWAYS beats doors. The 360 scan itself accumulated the evidence
-        # (INDICATOR_HITS frames of the goal's objects) — that IS the confirmation.
-        # Declare arrival right here, with the directions, and the journey is done.
-        _state["mode"] = "arrived"
-        if n_items:
-            return summary + f" You've reached the {goal}.", True
-        lead = ("You're back where you started — scan complete. " if confirm_start
-                else "Scan complete. ")
-        return lead + f"You've reached the {goal}.", True
-
-    # Branch (a-weak) — indicators were sighted but below the arrival bar. Same
-    # directed confirmation we give doors: turn the user toward the sighting and
-    # re-check there. Indicator priority holds: this runs BEFORE the door branch.
-    ind_clusters = [c for c in _cluster_bearings(_state["ind_bearings"])
+    lead = ("You're back where you started — scan complete. " if confirm_start
+            else "Scan complete. ")
+    ind_pts = _state["ind_bearings"]  # [(abs_heading, class)]
+    ind_clusters = [c for c in _cluster_bearings([b for b, _ in ind_pts])
                     if c[1] >= OBJ_MIN_SIGHTINGS]
-    if ind_clusters:
-        mean_signed, _n = max(ind_clusters, key=lambda c: c[1])  # densest sighting area
+
+    if indicator_ok and ind_clusters:
+        # Branch (a) — strong evidence STILL gets the directed double-check (never
+        # declare from the spin alone): turn toward the sightings, and go_indicator
+        # re-confirms there, then names everything it actually sees.
+        mean_signed, _n = max(ind_clusters, key=lambda c: c[1])
+        where = _direction(mean_signed)
         ref = _state["ref_heading"] or 0.0
         _state["target_heading"] = (ref + mean_signed) % 360.0
         _state["target_kind"] = "indicator"
         _enter_face_target()
-        return (summary + f" That might be the {goal} — let's make sure. Turn toward "
-                "it and point the camera there."), True
+        return (lead + f"I've seen signs of the {goal} {where}. Turn that way, and "
+                "let's make sure we've reached it."), True
+    if indicator_ok:
+        # Strong evidence but no usable bearings (e.g. no compass): undirected confirm.
+        _enter_go_indicator()
+        return lead + f"I think this is the {goal} — let me make sure. Keep panning slowly.", True
+
+    # Branch (a-weak) — indicators were sighted but below the arrival bar. Same
+    # directed confirmation we give doors: turn the user toward the sighting and
+    # re-check there. Indicator priority holds: this runs BEFORE the door branch.
+    if ind_clusters:
+        mean_signed, _n = max(ind_clusters, key=lambda c: c[1])  # densest sighting area
+        # Name the thing we actually saw there: the most-sighted class in that cluster.
+        members = [cls for b, cls in ind_pts
+                   if abs(((_signed_from_ref_deg(b) - mean_signed + 180.0) % 360.0) - 180.0)
+                   <= DOOR_CLUSTER_DEG]
+        modal = Counter(members).most_common(1)[0][0] if members else goal
+        name = _display(modal)
+        where = _direction(mean_signed)
+        ref = _state["ref_heading"] or 0.0
+        _state["target_heading"] = (ref + mean_signed) % 360.0
+        _state["target_kind"] = "indicator"
+        _enter_face_target()
+        # Deliberately NOT the full summary here: direction first, then the ask —
+        # "that might be the kitchen" with no referent confused users, and listing
+        # doors we aren't taking is noise. Short and concrete.
+        return (lead + f"I noticed {_article(name)} {name} {where}. Let's double-check "
+                "— turn that way and point the camera at it."), True
 
     # Branch (b) — doors: turn toward the chosen door, then re-confirm it before
     # guiding in. Flickers below DOOR_MIN_SIGHTINGS are noise, never a target.
@@ -213,6 +248,19 @@ def handle_goal(text: str) -> str:
     return goal
 
 
+def new_goal_request(text: str):
+    """An EXPLICIT spoken goal (/set_goal), as opposed to the per-frame goal echo.
+    Re-speaking a goal after arrival restarts the journey — without this, asking for
+    the same room again just replayed the stale arrival and needed a server restart."""
+    goal = resolve_goal(text)
+    if goal and _state["mode"] == "arrived":
+        _state["goal"] = goal
+        _state["near_latch"] = False
+        _state["gone"] = 0
+        _enter_discover()
+    return goal
+
+
 def accumulate_indicator_evidence(seen: set, indicators: set) -> set:
     """Update the per-room indicator counts and return the currently-confirmed set.
     During the compass 360 the evidence must be LOCALIZED (one 90-deg window), so
@@ -220,7 +268,11 @@ def accumulate_indicator_evidence(seen: set, indicators: set) -> set:
     _scan_counts.update(seen & indicators)
     if _state["mode"] == "discover" and _state["ref_heading"] is not None:
         return _confirmed_from_sectors()
-    return {c for c, n in _scan_counts.items() if n >= INDICATOR_HITS}
+    # The directed confirm (go_indicator) re-checks what the scan already flagged,
+    # so it uses the lower CONFIRM_HITS bar — arrival shouldn't keep the user
+    # pointing at an obvious fridge for extra seconds.
+    hits = CONFIRM_HITS if _state["mode"] == "go_indicator" else INDICATOR_HITS
+    return {c for c, n in _scan_counts.items() if n >= hits}
 
 
 def detect_transit(near_box: bool, door_confirmed: bool, cur_frac: float) -> tuple:
@@ -257,7 +309,11 @@ def detect_transit(near_box: bool, door_confirmed: bool, cur_frac: float) -> tup
             _state["gone"] = 0
             _state["near_age"] = 0
             _enter_discover()
-    elif _state["near_latch"] and not door_confirmed:
+    elif _state["near_latch"]:
+        # No door AT OUR FACE this frame: either nothing detected, or only a FAR
+        # door (small fill) — which, mid-walk-through, is the NEXT room's door, not
+        # the one we were touching. Both count toward "we've gone through"; letting
+        # far glimpses reset this counter once stalled the announcement for ~16 s.
         _state["gone"] += 1
         _state["near_age"] += 1
         if _state["gone"] >= TRANSIT_GONE or _state["near_age"] >= NEAR_HOLD_MAX:
@@ -267,13 +323,13 @@ def detect_transit(near_box: bool, door_confirmed: bool, cur_frac: float) -> tup
             _state["near_age"] = 0
             _enter_discover()
     elif door_confirmed:
-        _state["gone"] = 0  # door still in view but not close — not a transit
+        _state["gone"] = 0  # door in view but not close, latch not armed — not a transit
         _state["near_age"] = 0
     return transit, just_near
 
 
 def step(*, goal, heading, motion, w, seen, indicators, obj_dets, door_confirmed,
-         door_cx_frac, region, door_dist, transit, just_near, confirmed,
+         door_cx_frac, door_corro, region, door_dist, transit, just_near, confirmed,
          obst_guidance, obst_priority, obst_blocking) -> tuple:
     """Run the state machine for one frame. Returns
     (guidance, priority, announce_arrival, phrase, matched)."""
@@ -293,9 +349,11 @@ def step(*, goal, heading, motion, w, seen, indicators, obj_dets, door_confirmed
             _state["ref_heading"] = heading
             _state["last_heading"] = heading
         _state["skip_scan_prompt"] = True  # instruction is in THIS line; don't repeat it
-        guidance = ("You've gone through the doorway. Take two or three steps into the "
-                    "room, then slowly turn to your right, all the way around, back to "
-                    "where you started, so I can scan this room.")
+        # The at-the-door line already told them to walk through and take steps in —
+        # here we only kick off the new room's scan.
+        guidance = ("You're through. Now slowly turn to your right, all the way "
+                    "around, until you are facing where you started, so I can scan "
+                    "this room.")
         priority = True
 
     elif _state["mode"] == "discover":
@@ -337,31 +395,37 @@ def step(*, goal, heading, motion, w, seen, indicators, obj_dets, door_confirmed
             objs = _state["sector_objs"].setdefault(bucket, Counter())
             objs.update(seen & indicators)  # sighting COUNTS -> reliability gating later
             # Record TRUE bearings (camera heading + offset within the frame) for
-            # everything that matters: doors AND goal indicators.
+            # everything that matters: doors AND goal indicators. Indicator sightings
+            # keep their CLASS too, so the weak-confirm prompt can name what it saw
+            # ("I noticed a fridge on your left"), not just point vaguely.
             for icls, _icf, ixy in obj_dets:
                 if icls in indicators:
                     icx = ((ixy[0] + ixy[2]) / 2) / w
                     _state["ind_bearings"].append(
-                        (heading + (icx - 0.5) * ASSUMED_HFOV_DEG) % 360.0)
-            if door_confirmed:
+                        ((heading + (icx - 0.5) * ASSUMED_HFOV_DEG) % 360.0, icls))
+            if door_cx_frac is not None:
+                # Every frame with a VERIFIED door box counts toward the scan's
+                # evidence — the geometry + semantic-verifier funnel IS the quality
+                # gate here. A verifier-CORROBORATED frame (both models agree) counts
+                # DOUBLE: a brief sweep-past yields only ~2 such frames, and demanding
+                # 3 equal sightings made scans flaky (took 3 attempts live), while
+                # uncorroborated strong-conf stragglers — the wall pattern — still
+                # need three hits to fool it.
                 _state["door_seen"] = True
-                # Count the sighting and its bearing from the SAME frames (ones with an
-                # actual box) so the reliability threshold and the direction clusters
-                # always agree — a count without a bearing sent us down the
-                # no-compass "door nearby" path by mistake.
-                if door_cx_frac is not None:
-                    objs["door"] += 1
-                    bearing = (heading + (door_cx_frac - 0.5) * ASSUMED_HFOV_DEG) % 360.0
-                    _state["door_bearings"].append(bearing)
-            # Progress context by how far around they've turned (ambient, once each).
+                weight = 2 if door_corro else 1
+                objs["door"] += weight
+                bearing = (heading + (door_cx_frac - 0.5) * ASSUMED_HFOV_DEG) % 360.0
+                _state["door_bearings"].extend([bearing] * weight)
+            # Exactly TWO gentle nudges per scan — at 90 and 270 degrees. No progress
+            # narration ("halfway", "almost back"); completion is announced separately.
+            # The wordings differ because the frontend de-dupes identical consecutive
+            # ambient lines, and both nudges should actually be spoken.
             prog = abs(_state["net_rotation"])
             ms = _state["milestones"]
             if prog >= 270 and "75" not in ms:
-                ms.add("75"); guidance = "Almost back to where you started, keep turning."
-            elif prog >= 180 and "50" not in ms:
-                ms.add("50"); guidance = "Halfway around, keep turning."
+                ms.add("75"); guidance = "Keep scanning."
             elif prog >= 90 and "25" not in ms:
-                ms.add("25"); guidance = "Good, keep turning to your right."
+                ms.add("25"); guidance = "Good, keep scanning."
             # Done ONLY when a full circle of rotation has accumulated AND the compass
             # confirms they're facing the start direction again. Never on bucket
             # coverage alone — compass noise can fake that early, ending the scan
@@ -379,7 +443,13 @@ def step(*, goal, heading, motion, w, seen, indicators, obj_dets, door_confirmed
     elif _state["mode"] == "go_indicator":
         # Pass 2a: re-confirm the goal's objects, then arrive. (Doors ignored here.)
         if indicator_ok:
-            announce_arrival = True
+            # Settle window: the first object crossed the bar, but its neighbours
+            # (the fridge right next to the oven) may be a few frames behind — wait
+            # briefly so the arrival line names ALL of them.
+            _state["confirm_settle"] += 1
+            if _state["confirm_settle"] >= CONFIRM_SETTLE:
+                _state["mode"] = "arrived"
+                announce_arrival = True
         else:
             _state["scan_age"] += 1
             if _state["phase_age"] >= REPROMPT:
@@ -422,27 +492,54 @@ def step(*, goal, heading, motion, w, seen, indicators, obj_dets, door_confirmed
             turn = _turn_to(_state["target_heading"], h)
             if abs(turn) <= FACE_TOL:
                 if kind == "door":
+                    # SILENT handoff: the very next line is the one-shot door call-out
+                    # (direction + steps + hand cue, priority). A filler sentence here
+                    # would still be playing when it arrives and swallow it.
                     _enter_go_door()
-                    guidance = "The door should be right ahead of you now. Let's go to it."
                 else:
+                    # SILENT handoff here too: the scan-end line already commanded
+                    # "turn that way and point the camera at it" — the next thing the
+                    # user hears is the arrival itself. The "keep the camera there"
+                    # nudge only appears later if the confirmation drags.
                     _enter_go_indicator()
-                    guidance = (f"You should be facing the {goal} now. Hold the camera "
-                                "there and pan slowly while I confirm.")
-                priority = True
             else:
-                side = "right" if turn > 0 else "left"
-                guidance = f"Turn slowly to your {side} to face the {label}."  # ambient, re-evaluated live
+                # The scan-end announcement ALREADY said which way to turn — saying it
+                # again immediately in different words ("turn toward it" then "turn
+                # slowly to your right") reads as two instructions. Stay silent and
+                # let them turn; nudge only if they still haven't faced it after a
+                # while (stuck or turning the wrong way), then sparingly.
+                _state["phase_age"] += 1
+                if _state["phase_age"] >= REPROMPT:
+                    _state["phase_age"] = 0
+                    side = "right" if turn > 0 else "left"
+                    guidance = f"Turn slowly to your {side} to face the {label}."  # ambient
 
     elif _state["mode"] == "arrived":
         pass  # journey complete — arrival is reported via the arrived/phrase fields below
 
     else:  # go_door — Pass 2b: door-only concern.
+        if _state["obst_hold"] > 0:
+            _state["obst_hold"] -= 1  # the call-out is still playing; verdict follows
         if obst_blocking or obst_guidance:
             # Safety first: an obstacle in the walking lane overrides door guidance
             # (and a "path is clear" line gets spoken before door directions resume).
             guidance, priority = obst_guidance, obst_priority
+            if guidance:
+                _state["path_checked"] = True  # the warning IS the path verdict
+            if obst_guidance and not obst_blocking:
+                # The path just cleared and the user side-stepped — re-orient them in
+                # the SAME utterance if the door is in sight (two back-to-back priority
+                # lines would cut each other off), else re-arm the one-shot call-out.
+                if door_confirmed and region:
+                    guidance = obst_guidance + " " + _door_phrase(region, door_dist)
+                    _state["door_announced"] = True
+                else:
+                    _state["door_announced"] = False
         elif just_near:
-            guidance = "You're right at the door. Reach out, open it, and walk through."
+            # The whole door sequence in ONE utterance — network latency between
+            # separate commands would leave the user waiting at the door.
+            guidance = ("You're right at the door. Reach out with your hand, open it, "
+                        "walk through the doorway, and take two or three steps into the room.")
             priority = True
         elif _state["near_latch"] and not door_confirmed:
             # Standing at the door (detector saturated by the panel). Stay quiet —
@@ -450,7 +547,22 @@ def step(*, goal, heading, motion, w, seen, indicators, obj_dets, door_confirmed
             _state["scan_age"] = 0
         elif door_confirmed and region:
             _state["scan_age"] = 0  # door in sight -> confirmation holds
-            guidance = _door_phrase(region, door_dist)  # ambient (updates as you approach)
+            # STATIC guidance, in the user's requested order: (1) ONE call-out saying
+            # where the door is + "let me check the path"; (2) obstacle speech held
+            # until that sentence finishes; (3) the path verdict — clear -> the
+            # walking instruction, blocked -> the watchdog's calm warning.
+            if not _state["door_announced"]:
+                _state["door_announced"] = True
+                guidance = (_door_locate_phrase(region, door_dist)
+                            + " Let me check the path ahead.")
+                priority = True  # one-shot: must actually be spoken, never swallowed
+                _state["obst_hold"] = OBST_HOLDOFF
+                _state["path_checked"] = False
+            elif not _state["path_checked"] and _state["obst_hold"] == 0:
+                # Hold expired with no obstacle warning -> the clear verdict + how to walk.
+                _state["path_checked"] = True
+                guidance = "The path is clear. " + _door_go_phrase(door_dist)
+                priority = True
         else:
             # Confirmation scan failing: like branch (a), a flag that can't be
             # re-confirmed within a window means a full rescan, not endless nudging.

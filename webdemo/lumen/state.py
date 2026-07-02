@@ -48,7 +48,9 @@ _state = {"goal": None, "mode": "discover", "scan_age": 0,
           "target_heading": None, "target_kind": None,
           "skip_scan_prompt": False, "last_door_dist": None,
           "approach_frac": 0.0, "near_age": 0,
-          "obst_hits": 0, "obst_clear": 0, "obst_cool": 0, "obst_active": False}
+          "obst_hits": 0, "obst_clear": 0, "obst_cool": 0, "obst_active": False,
+          "fast_frames": 0, "door_announced": False, "confirm_settle": 0,
+          "obst_hold": 0, "path_checked": True}
 
 
 def _reset_scan_fields() -> None:
@@ -81,6 +83,7 @@ def _enter_go_indicator() -> None:
     """Pass 2a: re-confirm the goal's indicators with a fresh scan, then arrive."""
     _state["mode"] = "go_indicator"
     _reset_scan_fields()
+    _state["confirm_settle"] = 0  # settle window before announcing (see CONFIRM_SETTLE)
     _scan_counts.clear()  # fresh evidence so the confirm scan is a real re-check
     _door_hist.clear()
 
@@ -103,3 +106,6 @@ def _enter_go_door() -> None:
     _state["obst_clear"] = 0
     _state["obst_cool"] = 0
     _state["obst_active"] = False
+    _state["door_announced"] = False  # the ONE static door call-out for this approach
+    _state["obst_hold"] = 0           # obstacle-speech holdoff while the call-out plays
+    _state["path_checked"] = True     # armed (set False) by the call-out itself

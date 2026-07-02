@@ -16,6 +16,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from .config import OBST_SIGNAL, FLOOR_WALKABLE_LABELS
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # yolov8m, not n: on a GPU it's ~18 ms/frame slower but far more reliable at
@@ -43,20 +45,45 @@ if _verify_path.exists():
     print("Loading 4-class door verifier...")
     _verify_model = YOLO(str(_verify_path))
 
-# Phase B obstacle layer: monocular depth (Depth Anything V2 Small). Runs ONLY while
-# walking to a door, and catches UNNAMED clutter (clothes piles, boxes, bins) that the
-# YOLO class layer is blind to. Optional — if it can't load, Phase A still runs.
+# Unnamed-obstacle signal (see config.OBST_SIGNAL). Only the selected model loads:
+#   "floor" -> SegFormer-B0 (ADE20K semantic segmentation): is the walking lane floor?
+#   "depth" -> Depth Anything V2 Small (relative depth): the older tripwire, fallback.
+# Either is optional — if it can't load, the YOLO named-obstacle layer still runs.
 _depth_pipe = None
-try:
-    import torch  # noqa: E402
-    from transformers import pipeline as _hf_pipeline  # noqa: E402
-    print("Loading depth model (Depth Anything V2 Small)...")
-    _depth_pipe = _hf_pipeline("depth-estimation",
-                               model="depth-anything/Depth-Anything-V2-Small-hf",
-                               device=0 if torch.cuda.is_available() else -1)
-except Exception as e:  # noqa: BLE001 — any failure -> degrade to YOLO-only obstacles
-    print(f"Depth model unavailable ({type(e).__name__}); obstacle watchdog will use "
-          "YOLO classes only. To enable it: pip install transformers torch")
+_seg_infer = None          # callable: PIL image -> HxW ndarray of ADE20K class ids
+_seg_walkable_ids = None   # ids whose label counts as walkable (floor/rug/door...)
+if OBST_SIGNAL == "floor":
+    try:
+        import torch  # noqa: E402
+        from transformers import (AutoImageProcessor,  # noqa: E402
+                                  SegformerForSemanticSegmentation)
+        print("Loading floor segmentation (SegFormer-B0, ADE20K)...")
+        _seg_name = "nvidia/segformer-b0-finetuned-ade-512-512"
+        _seg_proc = AutoImageProcessor.from_pretrained(_seg_name)
+        _seg_dev = "cuda" if torch.cuda.is_available() else "cpu"
+        _seg_model = SegformerForSemanticSegmentation.from_pretrained(_seg_name).to(_seg_dev).eval()
+        _seg_walkable_ids = np.array(
+            [int(i) for i, n in _seg_model.config.id2label.items()
+             if any(k in n.lower() for k in FLOOR_WALKABLE_LABELS)])
+
+        def _seg_infer(pil_img):
+            with torch.no_grad():
+                inp = _seg_proc(images=pil_img, return_tensors="pt").to(_seg_dev)
+                return _seg_model(**inp).logits.argmax(1)[0].cpu().numpy()
+    except Exception as e:  # noqa: BLE001 — degrade to YOLO-only obstacles
+        print(f"Floor segmentation unavailable ({type(e).__name__}); obstacle watchdog "
+              "will use YOLO classes only. To enable it: pip install transformers torch")
+elif OBST_SIGNAL == "depth":
+    try:
+        import torch  # noqa: E402
+        from transformers import pipeline as _hf_pipeline  # noqa: E402
+        print("Loading depth model (Depth Anything V2 Small)...")
+        _depth_pipe = _hf_pipeline("depth-estimation",
+                                   model="depth-anything/Depth-Anything-V2-Small-hf",
+                                   device=0 if torch.cuda.is_available() else -1)
+    except Exception as e:  # noqa: BLE001 — degrade to YOLO-only obstacles
+        print(f"Depth model unavailable ({type(e).__name__}); obstacle watchdog will use "
+              "YOLO classes only. To enable it: pip install transformers torch")
 
 # Warm up models so the FIRST real frame isn't stalled by CUDA/kernel init
 # (that lag is the long silence at the start of the demo).
@@ -68,4 +95,6 @@ if _verify_model is not None:
     _verify_model.predict(_warm, verbose=False)
 if _depth_pipe is not None:
     _depth_pipe(Image.fromarray(np.zeros((288, 384, 3), dtype=np.uint8)))
+if _seg_infer is not None:
+    _seg_infer(Image.fromarray(np.zeros((640, 480, 3), dtype=np.uint8)))
 print("Ready.")

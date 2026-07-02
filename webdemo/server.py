@@ -27,8 +27,8 @@ from pathlib import Path
 
 # Importing the lumen package loads the models (once).
 from lumen import controller, geometry, obstacles, perception, state
-from lumen.config import MOTION_MAX
-from lumen.goals import indicators_for, resolve_goal
+from lumen.config import MOTION_COACH_FRAMES, MOTION_MAX
+from lumen.goals import indicators_for
 
 app = FastAPI()
 
@@ -59,8 +59,9 @@ def index() -> HTMLResponse:
 
 @app.post("/set_goal")
 def set_goal(g: GoalText) -> dict:
-    """Resolve a spoken phrase to a canonical room goal (or null if unknown)."""
-    goal = resolve_goal(g.text)
+    """Resolve a spoken phrase to a canonical room goal (or null if unknown).
+    Re-speaking a goal after an arrival restarts the journey."""
+    goal = controller.new_goal_request(g.text)
     return {"goal": goal, "heard": g.text}
 
 
@@ -99,11 +100,16 @@ def detect(frame: Frame) -> dict:
         # frame, so a fast segment doesn't stall the full-circle completion.
         if state._state["mode"] == "discover":
             geometry._track_turn(frame.heading)
+        # One blurred frame (autofocus hunt, exposure change) is not the user moving
+        # fast — skip it silently, and only COACH after several consecutive ones.
+        state._state["fast_frames"] += 1
+        coach = state._state["fast_frames"] >= MOTION_COACH_FRAMES
         return {
             "goal": goal, "mode": state._state["mode"], "boxes": [], "arrived": False,
             "matched": [], "phrase": "", "priority": False,
-            "guidance": "Slow down. Move the phone slowly.",
+            "guidance": "Slow down. Move the phone slowly." if coach else "",
         }
+    state._state["fast_frames"] = 0
 
     primary, secondary = indicators_for(goal)
     indicators = set(primary) | set(secondary)
@@ -123,8 +129,8 @@ def detect(frame: Frame) -> dict:
     guidance, priority, announce_arrival, phrase, matched = controller.step(
         goal=goal, heading=frame.heading, motion=motion, w=w, seen=seen,
         indicators=indicators, obj_dets=obj_dets, door_confirmed=dg.door_confirmed,
-        door_cx_frac=dg.door_cx_frac, region=dg.region, door_dist=dg.door_dist,
-        transit=transit, just_near=just_near, confirmed=confirmed,
+        door_cx_frac=dg.door_cx_frac, door_corro=dg.corro, region=dg.region,
+        door_dist=dg.door_dist, transit=transit, just_near=just_near, confirmed=confirmed,
         obst_guidance=obst_guidance, obst_priority=obst_priority, obst_blocking=obst_blocking)
 
     return {

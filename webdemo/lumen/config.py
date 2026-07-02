@@ -16,7 +16,12 @@ WINDOW, MIN_HITS = 3, 2  # 2-of-3 temporal rule for DOORS (presence, not accumul
 INDICATOR_HITS = 4
 # Motion gate: if the phone pans too fast the frame is blurred and useless, so we
 # skip detection and coach the user to slow down. Tunable (small-image mean diff).
-MOTION_MAX = 60.0
+# 85, up from 60: normal handheld turning was tripping the gate constantly.
+MOTION_MAX = 85.0
+# A single blurred frame (autofocus hunt, exposure change) is NOT the user moving
+# fast — only SPEAK "slow down" after this many consecutive too-fast frames.
+# Blurred frames are still silently skipped for detection either way.
+MOTION_COACH_FRAMES = 3
 
 # --- Door perception stack -------------------------------------------------------
 DOOR_CONF = 0.45
@@ -63,6 +68,12 @@ HAND_REACH_STEPS = 3  # within this many steps, ask the user to reach out and fe
 # --- Pacing ----------------------------------------------------------------------
 REPROMPT = 12          # cycles between spoken re-prompts (~4 s)
 ROOM_SCAN_CYCLES = 30  # frames for the go_indicator re-confirm before giving up
+# The directed confirmation is a RE-check of evidence the 360 scan already flagged —
+# it doesn't need the scan's own strictness. Fewer hits + a short settle keep the
+# arrival snappy (~2 s of steady pointing) while still naming ALL the adjacent
+# indicators (the fridge right next to the oven), not just whichever confirmed first.
+CONFIRM_HITS = 3       # detection frames per class during go_indicator (scan keeps 4)
+CONFIRM_SETTLE = 3     # ~1 s extra so neighbours cross the bar too
 DOOR_LOST_CYCLES = 36  # go_door frames with no door re-confirmed -> full rescan (~12 s)
 
 # --- Compass-driven 360 scan -----------------------------------------------------
@@ -80,12 +91,18 @@ DOOR_CLUSTER_DEG = 30.0           # door sightings within this many deg = the SA
 # Reliability gates for what the scan REPORTS and ACTS ON. Detection isn't as good
 # as human eyes: a door or fridge that flickered for a frame or two is noise — never
 # speak it, never navigate to it.
-DOOR_MIN_SIGHTINGS = 3            # a door cluster needs this many confirmed sightings to be real
+DOOR_MIN_SIGHTINGS = 3            # evidence UNITS for a real door: a verifier-corroborated
+                                  # frame counts 2, a bare strong-conf frame counts 1 — so
+                                  # 2 corroborated sweep-past frames suffice, 3 bare ones needed
 OBJ_MIN_SIGHTINGS = 3             # an object mention (per direction) needs this many sightings
 
 # --- Doorway transit -------------------------------------------------------------
 DOOR_FILL_FRAC = 0.85  # door height (fraction of frame) meaning "you're at the doorway"
-TRANSIT_GONE = 3       # cycles with no door after being at one -> user walked through
+# The at-the-door instruction asks for a whole sequence (open, walk through, take 2-3
+# steps in) — announcing "you're through" too early talks over the user mid-action,
+# but waiting too long feels broken. ~2 s with our door out of view lands right after
+# the steps in (far doors glimpsed in the NEW room don't reset this — see transit).
+TRANSIT_GONE = 6       # cycles with our door gone after being at it -> walked through
 # At arm's length a door is a flat panel: the detector still boxes it (huge box) but
 # the edge gate rejects it (smooth interior). If we TRACKED an approach down to this
 # distance, a saturated door box means "at the door" — walls can't fake that, because
@@ -95,8 +112,10 @@ APPROACH_FRAC = 0.5    # ...or the confirmed door grew to this frame-height frac
                        # (distance-scale independent, so calibration can't break it)
 # New rooms throw full-frame door candidates too, which would hold the at-the-door
 # latch forever (the user already walked through!). Cap how long the latch can hold
-# without a properly confirmed door before we infer the transit happened.
-NEAR_HOLD_MAX = 20     # ~7 s at ~3 fps
+# without a properly confirmed door before we infer the transit happened. Sized well
+# above TRANSIT_GONE so the failsafe never fires while the user is still standing at
+# the door listening to the (long) walk-through instruction.
+NEAR_HOLD_MAX = 40     # ~13 s at ~3 fps
 
 # --- Obstacle watchdog (Phase A: YOLO classes; the depth tripwire is Phase B) ----
 # While the user WALKS to a door (go_door), warn about known objects standing in the
@@ -108,21 +127,49 @@ OBST_NAMES = {"dining table": "table", "potted plant": "plant", "tv": "TV"}  # o
 CORRIDOR_X = (0.30, 0.70)  # central horizontal band = the lane the user walks into
 OBST_BOTTOM_FRAC = 0.62    # box bottom must reach below this (near the floor / close)
 OBST_MIN_H_FRAC = 0.18     # ignore tiny, far boxes
-OBST_MIN_OVERLAP = 0.04    # min lane overlap (fraction of width) to count as "in the way"
-OBST_HITS = 2              # consecutive frames before the FIRST alert (kills flicker)
+OBST_MIN_OVERLAP = 0.10    # min lane overlap (fraction of width) to count as "in the way"
+                           # (0.04 let side furniture grazing the lane edge trigger stops)
+OBST_HITS = 3              # consecutive frames before the FIRST alert (kills flicker)
 OBST_CLEAR_HITS = 2        # consecutive clear frames before declaring the path clear
 OBST_REPROMPT = 9          # frames between repeated warnings while still blocked (~3 s)
+# After the door call-out ("...let me check the path ahead"), obstacle speech is held
+# this many frames so the call-out finishes playing, then the path verdict follows —
+# either "the path is clear, walk..." or the obstacle warning. Detection still runs
+# during the hold; only the SPEECH waits.
+OBST_HOLDOFF = 5           # ~2 s
 
-# --- Phase B: depth tripwire (class-agnostic). We can't trust an absolute near/far
-# convention from the model, so each frame self-calibrates: the bottom strip (floor at
-# the feet) anchors "near", the top-centre strip anchors "far", and every region is
-# scored 0 (far) .. 1 (near) between them. An obstacle = the centre lane reads much
-# nearer than the side floor at the same height. Sign-agnostic and scale-free. ---
+# --- Unnamed-obstacle signal (OBST-3). The question was never "is there an object?"
+# but "is the strip of floor I'm about to walk on clear?" — so the primary signal is
+# now FLOOR SEGMENTATION: a semantic model labels every pixel, and the lane is
+# blocked when it stops being mostly floor. Class-agnostic like the old depth
+# tripwire, but grounded: a fan/bin BESIDE the path leaves the floor corridor
+# continuous (silent), a chair IN the path punches a hole in it (stop).
+# The depth tripwire is kept below as a one-line fallback for A/B comparison. ---
+OBST_SIGNAL = "floor"      # "floor" (segmentation) | "depth" (old tripwire) | "off" (YOLO only)
+# The lane judged for walkable floor: the strip just ahead of the feet, centre band.
+FLOOR_LANE_ROWS = (0.66, 0.94)   # rows of the frame checked for floor
+FLOOR_LANE_X = (0.38, 0.62)      # centre band (same width the depth lane used)
+FLOOR_MIN_COVER = 0.60     # lane must be at least this fraction walkable, else blocked
+# Pixel classes that count as walkable: floor/rug/carpet — plus DOOR, because in
+# go_door the door is the destination we're walking toward, never an obstacle.
+FLOOR_WALKABLE_LABELS = ("floor", "rug", "carpet", "door")
+
+# --- Phase B fallback: depth tripwire (class-agnostic). Self-calibrates per frame:
+# the bottom strip (floor at the feet) anchors "near", the top-centre strip anchors
+# "far"; an obstacle = the centre lane reads much nearer than the side floor at the
+# same height. Live testing showed it can't separate beside-path from in-path in
+# cluttered rooms — kept only for A/B comparison via OBST_SIGNAL = "depth". ---
 DEPTH_INPUT_W = 384        # downscale width for the depth net (~75 ms vs ~150 ms)
-DEPTH_LANE_ROWS = (0.45, 0.85)   # mid-lower rows = the strip just ahead of the feet
+# The depth lane is DELIBERATELY small: the floor strip 1-2 steps ahead of the feet,
+# in a narrow centre band. Live false alarms (a fan and a bin BESIDE the path, a far
+# wall) all came from judging higher rows and wider columns — things the user would
+# simply walk past. A real blocker mid-path floods this tight strip; side objects
+# barely graze it.
+DEPTH_LANE_ROWS = (0.68, 0.88)   # floor strip just ahead of the feet
+DEPTH_LANE_X = (0.38, 0.62)      # narrower centre band than the YOLO corridor
 DEPTH_NEAR_ROWS = (0.88, 1.00)   # bottom strip = floor at the feet (near anchor)
 DEPTH_FAR_ROWS = (0.00, 0.30)    # top strip ahead (far anchor)
 DEPTH_FLAT_MIN = 8.0       # if near/far anchors differ by less than this (of 255), the
                            # scene is too flat to judge (e.g. facing a near wall) -> skip
 DEPTH_REL_MARGIN = 0.18    # a lane pixel this much nearer than its row's floor = intrusion
-DEPTH_AREA_FRAC = 0.12     # this fraction of the centre lane intruding = a real obstacle
+DEPTH_AREA_FRAC = 0.40     # near HALF the tight lane must be blocked before we alert

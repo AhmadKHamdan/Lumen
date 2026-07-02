@@ -58,10 +58,13 @@ function logSpoke(t){
 }
 function speakNow(t){ try { speechSynthesis.speak(new SpeechSynthesisUtterance(t)); logSpoke(t); } catch(e){} }
 
-// Priority line (phase change / arrival): interrupt whatever's playing and speak.
-function speak(t){ if (!t) return; try { speechSynthesis.cancel(); } catch(e){} lastSpoken = t; speakNow(t); }
+// Priority line (phase change / arrival / path verdict): GUARANTEED to be spoken,
+// but never cuts another line off — speechSynthesis natively QUEUES, so it plays
+// the moment the current sentence finishes. (It used to cancel-and-interrupt, which
+// made "The path is clear..." talk over the door call-out.)
+function speak(t){ if (!t) return; lastSpoken = t; speakNow(t); }
 
-// Ambient nudge (scan / slow-down / door countdown): NEVER interrupt — skip if
+// Ambient nudge (scan / slow-down / turn correction): NEVER interrupt — skip if
 // something is already talking, and don't repeat the same line. This is the fix
 // for prompts overriding each other.
 function maybeSpeak(t, priority){

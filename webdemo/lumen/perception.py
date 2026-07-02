@@ -184,21 +184,26 @@ def process_doors(img, w: int, h: int, obj_dets):
             corro = any(xy[0] <= (hb[0] + hb[2]) / 2 <= xy[2]
                         and xy[1] <= (hb[1] + hb[3]) / 2 <= xy[3] for hb in vhandle)
         fridge_like = any(_iou(xy, fb) >= VERIFY_IOU for fb in vfridge)
+        # The fridge veto only counts when the verifier saw fridge evidence WITHOUT
+        # door evidence. It hallucinates 'refrigerator door' on real doors too, and
+        # vetoing frames it SIMULTANEOUSLY corroborated as doors (corro=True) kept
+        # breaking detection streaks on the actual door.
+        veto = fridge_like and not corro
         if dens >= DOOR_EDGE_MIN or _verify_model is None:
             # Textured interior (frame/seams/handle visible): confidence or
             # corroboration passes it, as before.
-            ok = not fridge_like and (_verify_model is None or conf >= DOOR_STRONG_CONF or corro)
+            ok = not veto and (_verify_model is None or conf >= DOOR_STRONG_CONF or corro)
         else:
             # Smooth interior: a blank wall OR a plain door in dim light — confidence
             # CANNOT tell them apart (walls score 0.9 too), so only semantic proof
             # (the verifier seeing a door or a handle there) passes it.
-            ok = not fridge_like and corro
+            ok = corro
         if DOOR_DEBUG:
             print(f"[door] conf={conf:.2f} edge={dens:.3f} corro={corro} "
                   f"fridge_like={fridge_like} -> {'KEEP' if ok else 'reject (verify)'}",
                   flush=True)
         if ok:
-            door_dets.append((conf, xy))
+            door_dets.append((conf, xy, corro))  # keep corro: corroborated = strong evidence
         # NOTE: a fridge_like rejection does NOT become a refrigerator sighting.
         # The verifier hallucinates 'refrigerator door' on blank walls, and feeding
         # those into the indicator evidence caused fake fridges in the arrival
@@ -208,7 +213,14 @@ def process_doors(img, w: int, h: int, obj_dets):
     # A COCO 'refrigerator' claim that sits on a door candidate is suspect — a real
     # door at an angle often reads as a fridge. Keep it ONLY if the verifier saw a
     # 'refrigerator door' there; otherwise it IS the door (kills false kitchen arrivals).
-    if _verify_model is not None and door_cands:
+    # EXCEPT during the directed indicator confirmation: there the user is deliberately
+    # pointing at the appliance, the door model routinely fires on real fridges, and
+    # this drop was starving the confirmation of its fridge sightings for ~17 s.
+    # The confidence-based cross-suppression below still arbitrates the same-box clash.
+    confirm_phase = (_state["mode"] == "go_indicator"
+                     or (_state["mode"] == "face_target"
+                         and _state["target_kind"] == "indicator"))
+    if _verify_model is not None and door_cands and not confirm_phase:
         kept_objs = []
         for cls, ocf, oxy in obj_dets:
             if (cls == "refrigerator"
@@ -227,7 +239,7 @@ def process_doors(img, w: int, h: int, obj_dets):
     # accurate door model keeps its recall.
     drop_obj, drop_door = set(), set()
     for i, (_ocls, ocf, oxy) in enumerate(obj_dets):
-        for j, (dcf, dxy) in enumerate(door_dets):
+        for j, (dcf, dxy, _dcorro) in enumerate(door_dets):
             if _iou(oxy, dxy) >= DOOR_OBJ_IOU:
                 if dcf >= ocf:
                     drop_obj.add(i)
@@ -252,7 +264,7 @@ def build_boxes(obj_dets, door_dets, indicators: set, w: int, h: int):
             "box": [x1 / w, y1 / h, x2 / w, y2 / h],  # normalized
             "indicator": cls in indicators,
         })
-    for conf, (x1, y1, x2, y2) in door_dets:
+    for conf, (x1, y1, x2, y2), _corro in door_dets:
         boxes.append({
             "cls": "door", "conf": round(conf, 2),
             "box": [x1 / w, y1 / h, x2 / w, y2 / h],
@@ -271,15 +283,17 @@ class DoorGeom:
     door_cx_frac: float | None
     door_confirmed: bool
     door_dist: float | None
+    corro: bool = False  # was this frame's strongest door verifier-corroborated?
 
 
 def door_geometry(door_dets, vdoor, w: int, h: int) -> DoorGeom:
     """Bearing + distance of the strongest door, its 2-of-3 temporal confirmation, and
     the steadied step distance. Updates the rolling `_door_hist` and remembers how close
     the approach got (`last_door_dist`)."""
-    door_areas = [xy for _conf, xy in door_dets]
-    if door_areas:
-        bx = max(door_areas, key=lambda d: (d[2] - d[0]) * (d[3] - d[1]))
+    best_corro = False
+    if door_dets:
+        bx, best_corro = max(((xy, co) for _conf, xy, co in door_dets),
+                             key=lambda t: (t[0][2] - t[0][0]) * (t[0][3] - t[0][1]))
         door_cx_frac = ((bx[0] + bx[2]) / 2) / w  # 0 = left edge .. 1 = right edge
         region = _door_region(door_cx_frac)
         # The primary model's boxes run LOOSE at range (wall above/below the door),
@@ -305,4 +319,5 @@ def door_geometry(door_dets, vdoor, w: int, h: int) -> DoorGeom:
     door_dist = _dists[len(_dists) // 2] if _dists else None
     if door_confirmed and door_dist is not None:
         _state["last_door_dist"] = door_dist  # remember how close the approach got
-    return DoorGeom(region, dist_m, cur_frac, door_cx_frac, door_confirmed, door_dist)
+    return DoorGeom(region, dist_m, cur_frac, door_cx_frac, door_confirmed, door_dist,
+                    best_corro)

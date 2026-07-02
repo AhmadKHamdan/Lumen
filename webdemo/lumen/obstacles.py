@@ -18,10 +18,12 @@ import numpy as np
 from PIL import Image
 
 from .config import (CORRIDOR_X, DEPTH_AREA_FRAC, DEPTH_FAR_ROWS, DEPTH_FLAT_MIN,
-                     DEPTH_INPUT_W, DEPTH_LANE_ROWS, DEPTH_NEAR_ROWS, DEPTH_REL_MARGIN,
-                     DOOR_DEBUG, OBST_BOTTOM_FRAC, OBST_CLEAR_HITS, OBST_HITS,
-                     OBST_MIN_H_FRAC, OBST_MIN_OVERLAP, OBST_NAMES, OBST_REPROMPT)
-from .models import _depth_pipe
+                     DEPTH_INPUT_W, DEPTH_LANE_ROWS, DEPTH_LANE_X, DEPTH_NEAR_ROWS,
+                     DEPTH_REL_MARGIN, DOOR_DEBUG, FLOOR_LANE_ROWS, FLOOR_LANE_X,
+                     FLOOR_MIN_COVER, OBST_BOTTOM_FRAC, OBST_CLEAR_HITS, OBST_HITS,
+                     OBST_MIN_H_FRAC, OBST_MIN_OVERLAP, OBST_NAMES, OBST_REPROMPT,
+                     OBST_SIGNAL)
+from .models import _depth_pipe, _seg_infer, _seg_walkable_ids
 from .state import _state
 
 
@@ -58,7 +60,9 @@ def _depth_tripwire(d):
         return None  # too flat to judge (e.g. facing a near blank wall)
 
     lane = (d[r0:r1] - far_ref) / denom          # nearness map: 0 far .. 1 near
-    cL, cR = int(CORRIDOR_X[0] * W), int(CORRIDOR_X[1] * W)
+    # The depth lane is narrower than the YOLO corridor: side objects (a fan, a bin
+    # beside the door) must not graze into it — only a mid-path blocker should.
+    cL, cR = int(DEPTH_LANE_X[0] * W), int(DEPTH_LANE_X[1] * W)
     sL, sR = int(0.22 * W), int(0.78 * W)
     side_floor = np.median(np.concatenate([lane[:, :sL], lane[:, sR:]], axis=1),
                            axis=1, keepdims=True)  # per-row floor baseline
@@ -71,6 +75,36 @@ def _depth_tripwire(d):
         return None
     half = intrude.shape[1] // 2  # step away from the half where the intrusion sits
     return "right" if intrude[:, :half].sum() > intrude[:, half:].sum() else "left"
+
+
+def _floor_tripwire(img):
+    """Floor-segmentation obstacle check (OBST-3). Returns the side to step toward
+    ('left'/'right') if the walking lane has stopped being mostly floor, else None.
+
+    A semantic model labels every pixel; the lane (a floor strip just ahead of the
+    feet, centre band) must stay mostly walkable — floor/rug, plus the door we are
+    deliberately walking toward. Something BESIDE the path leaves the lane's floor
+    continuous; something IN the path punches a hole in it. The sidestep suggestion
+    points at whichever flank has more visible floor."""
+    if _seg_infer is None:
+        return None
+    ids = _seg_infer(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
+    walk = np.isin(ids, _seg_walkable_ids)
+    H, W = walk.shape
+    r0, r1 = int(FLOOR_LANE_ROWS[0] * H), int(FLOOR_LANE_ROWS[1] * H)
+    cL, cR = int(FLOOR_LANE_X[0] * W), int(FLOOR_LANE_X[1] * W)
+    lane = walk[r0:r1, cL:cR]
+    cover = float(lane.mean()) if lane.size else 1.0
+    left = walk[r0:r1, int(0.10 * W):cL]
+    right = walk[r0:r1, cR:int(0.90 * W)]
+    lcov = float(left.mean()) if left.size else 0.0
+    rcov = float(right.mean()) if right.size else 0.0
+    if DOOR_DEBUG:
+        print(f"[floor] lane={cover:.2f} L={lcov:.2f} R={rcov:.2f}"
+              f"{'' if cover >= FLOOR_MIN_COVER else ' -> blocked'}", flush=True)
+    if cover >= FLOOR_MIN_COVER:
+        return None
+    return "left" if lcov >= rcov else "right"
 
 
 def _obstacle_in_corridor(obstacle_dets, w: int, h: int):
@@ -91,12 +125,13 @@ def _obstacle_in_corridor(obstacle_dets, w: int, h: int):
     return None if best is None else (best[1], best[2])
 
 
-def _obstacle_watchdog(obstacle_dets, depth_map, w: int, h: int):
+def _obstacle_watchdog(obstacle_dets, unnamed_side, w: int, h: int):
     """Debounced corridor watchdog fusing two layers: the YOLO class layer (names the
-    object) and the depth tripwire (catches anything, named or not). Returns
-    (guidance, priority, blocking). blocking=True means a confirmed obstacle is in the
-    lane now, so the caller suppresses door guidance. Speaks on first confirm, again
-    every OBST_REPROMPT frames while still blocked, and once when the path clears."""
+    object) and the class-agnostic unnamed signal (floor or depth — precomputed by
+    the caller as a step-aside side, or None). Returns (guidance, priority, blocking).
+    blocking=True means a confirmed obstacle is in the lane now, so the caller
+    suppresses door guidance. Speaks on first confirm, again every OBST_REPROMPT
+    frames while still blocked, and once when the path clears."""
     yolo = _obstacle_in_corridor(obstacle_dets, w, h)   # (cls, cx) or None
     if yolo is not None:
         cls, cx = yolo
@@ -104,23 +139,27 @@ def _obstacle_watchdog(obstacle_dets, depth_map, w: int, h: int):
         art = "an" if name[:1].lower() in "aeiou" else "a"
         what, side = f"{art} {name}", ("right" if cx < 0.5 else "left")
     else:
-        dside = _depth_tripwire(depth_map)              # 'left'/'right' or None
-        what, side = ("something", dside) if dside else (None, None)
+        what, side = ("something", unnamed_side) if unnamed_side else (None, None)
 
     if what is not None:
         _state["obst_clear"] = 0
         _state["obst_hits"] += 1
         if _state["obst_hits"] < OBST_HITS:
             return "", False, False  # not confirmed yet -> let door guidance run
+        if _state["obst_hold"] > 0:
+            # The door call-out ("...let me check the path ahead") is still playing —
+            # confirmed, but hold the SPEECH so the sentence finishes; the warning
+            # becomes the path verdict right after. Calm tone, never a barked "Stop".
+            return "", False, True
         if DOOR_DEBUG:
             print(f"[obst] {what} -> blocking, step {side}", flush=True)
         if not _state["obst_active"]:
             _state["obst_active"] = True
             _state["obst_cool"] = OBST_REPROMPT
-            return f"Stop. There's {what} in your way. Step to your {side}.", True, True
+            return f"There's {what} in your path. Step to your {side}, where it's clear.", True, True
         if _state["obst_cool"] <= 0:
             _state["obst_cool"] = OBST_REPROMPT
-            return f"Still blocked. Step to your {side}, slowly.", True, True
+            return f"It's still in your path — step more to your {side}.", True, True
         _state["obst_cool"] -= 1
         return "", False, True  # blocking, mid-cooldown -> stay silent this frame
     # corridor clear this frame
@@ -140,8 +179,15 @@ def evaluate(obstacle_dets, img, w: int, h: int):
     door panel itself fills the lane). Off-walk, reset the debounce so the next approach
     starts clean. Returns (guidance, priority, blocking)."""
     if _state["mode"] == "go_door" and not _state["near_latch"]:
-        depth_map = _depth_map(img)  # None if the depth model didn't load (YOLO-only)
-        return _obstacle_watchdog(obstacle_dets, depth_map, w, h)
+        # The class-agnostic unnamed signal, per OBST_SIGNAL ("off" or a model that
+        # failed to load -> None -> YOLO named obstacles only).
+        if OBST_SIGNAL == "floor":
+            unnamed_side = _floor_tripwire(img)
+        elif OBST_SIGNAL == "depth":
+            unnamed_side = _depth_tripwire(_depth_map(img))
+        else:
+            unnamed_side = None
+        return _obstacle_watchdog(obstacle_dets, unnamed_side, w, h)
     _state["obst_hits"] = 0
     _state["obst_clear"] = 0
     _state["obst_active"] = False
