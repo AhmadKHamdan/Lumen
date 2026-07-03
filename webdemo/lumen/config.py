@@ -107,9 +107,21 @@ TRANSIT_GONE = 6       # cycles with our door gone after being at it -> walked t
 # the edge gate rejects it (smooth interior). If we TRACKED an approach down to this
 # distance, a saturated door box means "at the door" — walls can't fake that, because
 # they were never confirmed as an approaching door first.
-NEAR_DOOR_M = 3.5      # last confirmed distance below this = the approach reached the door
-APPROACH_FRAC = 0.5    # ...or the confirmed door grew to this frame-height fraction
-                       # (distance-scale independent, so calibration can't break it)
+NEAR_DOOR_M = 2.0      # last confirmed distance below this = the approach reached the door
+                       # (at-the-door readings saturate ~1.7-1.8 m; 3.5 was so loose that
+                       # STANDING 3 steps away armed the latch without a single step)
+APPROACH_FRAC = 0.8    # ...or the confirmed door grew to this frame-height fraction
+                       # (genuine at-door frames read 0.94-1.0; a door 3 steps away
+                       # already fills ~0.75, so 0.5 was trivially satisfied)
+# The camera itself tells us whether the user MOVED: walking produces sustained
+# frame-to-frame motion (> STILL_MAX), standing still reads near zero. "You're
+# through" additionally requires this many movement frames after reaching the door —
+# no movement, no transit, no matter what detection flickers do.
+WALK_FRAMES_MIN = 4
+# "You're right at the door" needs this many CONSECUTIVE qualifying frames. A single
+# spiky loose box (86% of frame height while mid-sidestep, next frame 3.4 m) once
+# armed the latch and spoke at-door instructions out of order with the obstacle flow.
+NEAR_STREAK = 2
 # New rooms throw full-frame door candidates too, which would hold the at-the-door
 # latch forever (the user already walked through!). Cap how long the latch can hold
 # without a properly confirmed door before we infer the transit happened. Sized well

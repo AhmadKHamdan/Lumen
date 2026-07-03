@@ -122,7 +122,8 @@ def detect(frame: Frame) -> dict:
     # Interpretation: arrival evidence, door geometry, transit, obstacles.
     confirmed = controller.accumulate_indicator_evidence(seen, indicators)
     dg = perception.door_geometry(door_dets, vdoor, w, h)
-    transit, just_near = controller.detect_transit(near_box, dg.door_confirmed, dg.cur_frac)
+    transit, just_near = controller.detect_transit(near_box, dg.door_confirmed,
+                                                   dg.cur_frac, motion)
     obst_guidance, obst_priority, obst_blocking = obstacles.evaluate(obstacle_dets, img, w, h)
 
     # Decision: the state machine produces what to say this frame.

@@ -50,7 +50,7 @@ _state = {"goal": None, "mode": "discover", "scan_age": 0,
           "approach_frac": 0.0, "near_age": 0,
           "obst_hits": 0, "obst_clear": 0, "obst_cool": 0, "obst_active": False,
           "fast_frames": 0, "door_announced": False, "confirm_settle": 0,
-          "obst_hold": 0, "path_checked": True}
+          "obst_hold": 0, "path_checked": True, "walk_frames": 0, "near_streak": 0}
 
 
 def _reset_scan_fields() -> None:
@@ -109,3 +109,8 @@ def _enter_go_door() -> None:
     _state["door_announced"] = False  # the ONE static door call-out for this approach
     _state["obst_hold"] = 0           # obstacle-speech holdoff while the call-out plays
     _state["path_checked"] = True     # armed (set False) by the call-out itself
+    _state["walk_frames"] = 0         # camera-motion frames = evidence the user MOVED
+    _state["near_streak"] = 0         # consecutive at-door frames (spike immunity)
+    _state["near_latch"] = False      # fresh approach = fresh latch
+    _state["gone"] = 0
+    _state["near_age"] = 0

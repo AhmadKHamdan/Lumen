@@ -175,19 +175,24 @@ def _obstacle_watchdog(obstacle_dets, unnamed_side, w: int, h: int):
 
 
 def evaluate(obstacle_dets, img, w: int, h: int):
-    """Run the watchdog only while WALKING up to a door (not once we're at it, where the
-    door panel itself fills the lane). Off-walk, reset the debounce so the next approach
-    starts clean. Returns (guidance, priority, blocking)."""
-    if _state["mode"] == "go_door" and not _state["near_latch"]:
-        # The class-agnostic unnamed signal, per OBST_SIGNAL ("off" or a model that
-        # failed to load -> None -> YOLO named obstacles only).
-        if OBST_SIGNAL == "floor":
-            unnamed_side = _floor_tripwire(img)
-        elif OBST_SIGNAL == "depth":
-            unnamed_side = _depth_tripwire(_depth_map(img))
-        else:
-            unnamed_side = None
-        return _obstacle_watchdog(obstacle_dets, unnamed_side, w, h)
+    """Run the watchdog while WALKING in go_door. Off-walk (scanning/turning phases),
+    reset the debounce so the next approach starts clean.
+    Returns (guidance, priority, blocking)."""
+    if _state["mode"] == "go_door":
+        if not _state["near_latch"]:
+            # Approach: both layers. The class-agnostic unnamed signal per OBST_SIGNAL
+            # ("off" or a model that failed to load -> None -> YOLO only).
+            if OBST_SIGNAL == "floor":
+                unnamed_side = _floor_tripwire(img)
+            elif OBST_SIGNAL == "depth":
+                unnamed_side = _depth_tripwire(_depth_map(img))
+            else:
+                unnamed_side = None
+            return _obstacle_watchdog(obstacle_dets, unnamed_side, w, h)
+        # AT/THROUGH the door: the panel fills the frame, so the floor/depth signal
+        # is meaningless here and pauses — but a PERSON stepping into the doorway is
+        # still a named YOLO box. The named layer stays armed through the transit.
+        return _obstacle_watchdog(obstacle_dets, None, w, h)
     _state["obst_hits"] = 0
     _state["obst_clear"] = 0
     _state["obst_active"] = False

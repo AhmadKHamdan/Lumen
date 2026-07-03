@@ -275,27 +275,61 @@ def accumulate_indicator_evidence(seen: set, indicators: set) -> set:
     return {c for c, n in _scan_counts.items() if n >= hits}
 
 
-def detect_transit(near_box: bool, door_confirmed: bool, cur_frac: float) -> tuple:
+def detect_transit(near_box: bool, door_confirmed: bool, cur_frac: float,
+                   motion: float) -> tuple:
     """Decide whether the user just walked through a doorway (only meaningful in
     go_door). Mutates the near-latch state and, on a confirmed transit, resets to a
-    fresh discover scan. Returns (transit, just_near)."""
+    fresh discover scan. Returns (transit, just_near).
+
+    THE MOVEMENT GATE: the camera itself is our odometer — walking produces
+    sustained frame motion, standing still reads near zero. A transit additionally
+    requires WALK_FRAMES_MIN movement frames after reaching the door, so detection
+    flicker can NEVER fake "you're through" while the user hasn't taken a step."""
     transit = False
     just_near = False  # near_latch turned on THIS frame -> announce "you're at the door"
     if _state["mode"] == "go_door" and door_confirmed:
         # Track how big the confirmed door got during this approach (scale-free).
         _state["approach_frac"] = max(_state["approach_frac"], cur_frac)
+    if _state["mode"] == "go_door" and _state["near_latch"] and motion > STILL_MAX:
+        _state["walk_frames"] += 1  # evidence of actual steps since reaching the door
     # The saturated close-range box only counts if a tracked approach already got us
     # near this door — a wall pointed at mid-walk was never a confirmed approach.
     # Two near signals: metric distance, OR the confirmed door having grown to fill
-    # half the frame (immune to distance-calibration changes).
+    # the frame (immune to distance-calibration changes).
     at_door_box = near_box and (
         (_state["last_door_dist"] is not None and _state["last_door_dist"] <= NEAR_DOOR_M)
         or _state["approach_frac"] >= APPROACH_FRAC)
+
+    def _fire_or_wait() -> bool:
+        """Transit thresholds hit: fire only if the user actually WALKED; otherwise
+        they're still standing at the door — re-prompt instead of hallucinating."""
+        nonlocal transit, just_near
+        _state["gone"] = 0
+        _state["near_age"] = 0
+        if _state["walk_frames"] >= WALK_FRAMES_MIN:
+            transit = True
+            _state["near_latch"] = False
+            _enter_discover()
+        else:
+            just_near = True  # gently repeat the at-the-door instruction
+        return transit
+
+    # At-door can only ARM: (a) on NEAR_STREAK consecutive qualifying frames — a
+    # single spiky loose box mid-sidestep once spoke "you're at the door" from 2 m —
+    # and (b) never while an obstacle episode is open: the episode must finish with
+    # its "way is clear + door re-orientation" line first, or the spoken order
+    # contradicts itself ("you're at the door" ... "the door is 4 steps ahead").
+    near_now = (door_confirmed and cur_frac >= DOOR_FILL_FRAC) or at_door_box
+    can_arm = _state["near_latch"] or (not _state["obst_active"]
+                                       and _state["near_streak"] + 1 >= NEAR_STREAK)
     if _state["mode"] != "go_door":
         _state["near_latch"] = False
         _state["gone"] = 0
         _state["near_age"] = 0
-    elif (door_confirmed and cur_frac >= DOOR_FILL_FRAC) or at_door_box:
+        _state["walk_frames"] = 0
+        _state["near_streak"] = 0
+    elif near_now and can_arm:
+        _state["near_streak"] += 1
         just_near = not _state["near_latch"]
         _state["near_latch"] = True
         _state["gone"] = 0
@@ -304,12 +338,11 @@ def detect_transit(near_box: bool, door_confirmed: bool, cur_frac: float) -> tup
         # the hold timer; saturated-box frames age it until we infer the transit.
         _state["near_age"] = 0 if door_confirmed else _state["near_age"] + 1
         if _state["near_age"] >= NEAR_HOLD_MAX:
-            transit = True
-            _state["near_latch"] = False
-            _state["gone"] = 0
-            _state["near_age"] = 0
-            _enter_discover()
+            _fire_or_wait()
+    elif near_now:
+        _state["near_streak"] += 1  # building the streak; not armed yet
     elif _state["near_latch"]:
+        _state["near_streak"] = 0
         # No door AT OUR FACE this frame: either nothing detected, or only a FAR
         # door (small fill) — which, mid-walk-through, is the NEXT room's door, not
         # the one we were touching. Both count toward "we've gone through"; letting
@@ -317,14 +350,13 @@ def detect_transit(near_box: bool, door_confirmed: bool, cur_frac: float) -> tup
         _state["gone"] += 1
         _state["near_age"] += 1
         if _state["gone"] >= TRANSIT_GONE or _state["near_age"] >= NEAR_HOLD_MAX:
-            transit = True
-            _state["near_latch"] = False
-            _state["gone"] = 0
-            _state["near_age"] = 0
-            _enter_discover()
+            _fire_or_wait()
     elif door_confirmed:
         _state["gone"] = 0  # door in view but not close, latch not armed — not a transit
         _state["near_age"] = 0
+        _state["near_streak"] = 0  # a streak means CONSECUTIVE qualifying frames
+    else:
+        _state["near_streak"] = 0
     return transit, just_near
 
 
