@@ -1,0 +1,207 @@
+% =========================
+% Chapter 3
+% =========================
+\chapter{Related Work}
+\label{ch:related_work}
+
+\section{Assistive Vision Systems for Blind Users}
+\label{sec:assistive_vision_systems}
+
+Assistive vision systems for blind and visually impaired users have been an active
+area of research for several decades, driven by advances in computer vision, wearable
+sensing, and audio-based interaction. These systems typically employ cameras mounted
+on wearable or handheld devices to capture visual information from the user's
+environment and translate it into non-visual feedback, most commonly through speech
+or spatialized audio. The primary objective is to enhance environmental awareness,
+enabling users to perceive obstacles, objects, and spatial layout that would
+otherwise be inaccessible through traditional mobility aids alone.
+
+Early assistive vision approaches focused on specific perceptual functions such as
+obstacle detection, depth estimation, and object recognition, often providing simple
+auditory cues or alerts to indicate the presence of
+hazards~\cite{dakopoulos2010wearable}. As computer vision techniques matured, more
+comprehensive systems emerged that attempted to describe broader aspects of the
+surrounding scene, including object categories, relative positions, and semantic
+context~\cite{li2018vision}. These systems generally rely on continuous or
+near-continuous visual processing pipelines, transforming camera input into spoken
+descriptions intended to substitute or augment visual perception.
+
+More recent work has explored increasingly sophisticated capabilities, including
+semantic scene understanding, indoor layout recognition, and landmark
+identification~\cite{fernandes2019review}. Advances in deep learning have enabled
+higher recognition accuracy and robustness in complex indoor environments, while
+improvements in wearable hardware have facilitated hands-free operation through smart
+glasses and body-mounted cameras. Many of these systems emphasize real-time feedback
+and aim to provide a rich representation of the user's surroundings, often
+prioritizing completeness of information over selectivity.
+
+Despite significant progress, existing assistive vision systems vary widely in how
+perception is activated, how information is structured, and how feedback is delivered
+to users. This diversity reflects differing assumptions about user needs and system
+goals, and it motivates a closer examination of interaction paradigms, information
+delivery strategies, and control structures, discussed in the following sections.
+
+\section{Interaction Paradigms: Continuous Narration vs.\ On-Demand Assistance}
+\label{sec:interaction_paradigms}
+
+A central design dimension in assistive vision systems is the interaction paradigm
+that governs when perception is activated and how information is delivered. Prior
+work largely falls into two dominant paradigms: continuous scene narration and
+on-demand, query-based assistance.
+
+Continuous narration systems aim to provide persistent situational awareness by
+continuously processing visual input and verbalizing detected objects, obstacles, and
+scene elements~\cite{li2018vision, fernandes2019review}. While this approach can
+increase environmental coverage, it often results in verbose and redundant feedback,
+requiring users to continuously filter relevant information from irrelevant details.
+Studies in assistive technology and auditory interfaces have shown that such
+uninterrupted information streams can significantly increase cognitive load,
+interfere with attention to ambient sounds, and reduce overall task
+performance~\cite{martinez2014cognitive, hossain2010cognitive}.
+
+In contrast, on-demand and query-based assistive systems restrict perception and
+feedback to moments explicitly initiated by the user through individual
+queries~\cite{khan2020insight, li2018vision}. By limiting feedback to user-triggered
+queries, on-demand approaches reduce continuous cognitive burden and offer greater
+control over information flow. However, they introduce a different challenge: users
+must know what to ask for and when. In unfamiliar environments, blind users may lack
+sufficient situational context to formulate appropriate queries, leading to delayed
+or incomplete assistance.
+
+Both paradigms reflect implicit assumptions about user behavior and system
+responsibility. Continuous narration assumes that more information leads to better
+awareness; query-based systems assume that users can effectively manage their own
+information needs. In practice, neither assumption consistently holds. This tension
+highlights a gap in current assistive vision research: the lack of interaction models
+that dynamically align perception and feedback with user intent and task context.
+Lumen's task-scoped paradigm addresses exactly this gap --- perception is activated
+by a task, structured by that task's phases, and terminated with it --- and its
+navigation mode goes one step further by treating the \emph{user} as a collaborative
+resource, asked for a direction hint only when perception alone is genuinely
+ambiguous.
+
+\section{Indoor Navigation and Object-Finding Systems}
+\label{sec:indoor_navigation_object_finding}
+
+Indoor navigation and object-finding represent two of the most common and challenging
+assistive tasks. Unlike outdoor navigation, which can rely on GPS and large-scale
+mapping, indoor environments are highly structured, dynamic, and GPS-denied,
+requiring alternative sensing and localization strategies~\cite{fernandes2019review}.
+
+Indoor navigation systems for blind users often guide users between predefined
+locations using landmarks, visual markers, or spatial cues extracted from the
+environment~\cite{guerrero2012navigation, rodriguez2012navigation}. Notably,
+infrastructure-based systems such as NavCog~\cite{ahmetovic2016navcog} achieve
+reliable turn-by-turn guidance by instrumenting the building with beacons and
+pre-built maps --- an approach that works well in flagship venues but does not scale
+to arbitrary homes and offices. Vision-based approaches avoid instrumentation by
+detecting doors, corridors, and signage from camera input, but many rely on prior
+mapping or fiducial markers, and most assume a known route rather than genuine
+exploration of an unknown space. Lumen's navigation deliberately occupies the
+uninstrumented end of this spectrum: no maps, no markers, no SLAM --- exploration
+driven by door detection and semantic room recognition, with the human contributing
+coarse direction knowledge that the sensors cannot provide.
+
+Object-finding systems help users locate specific items within their immediate
+surroundings~\cite{brilhault2011object, tapu2014wearable}, commonly employing
+real-time object detection and audio cues to guide users toward a target. Although
+object-finding is often treated as a simpler problem than navigation, it presents
+similar challenges in perception reliability, spatial feedback, and interaction flow.
+Many existing systems continuously scan the environment or require repeated user
+queries, offering limited structure for task initiation, progression, and
+termination. Lumen structures the entire object-finding interaction as one task with
+explicit phases --- search, track, reach, grasp --- ending either by the user's
+confirmation or by the system detecting the grasp itself.
+
+\section{Cognitive Load and Information Management}
+\label{sec:cognitive_load}
+
+Cognitive load has been widely recognized as a critical factor in the effectiveness
+of assistive technologies. Assistive systems rely on auditory feedback as the primary
+communication channel, requiring users to process spoken information while
+simultaneously attending to environmental sounds, spatial cues, and physical
+navigation. Excessive or poorly structured auditory information overwhelms users,
+reducing task performance and situational
+awareness~\cite{hossain2010cognitive, martinez2014cognitive}.
+
+Beyond the quantity of information, prior work emphasizes timing, structure, and
+context: information presented outside an immediate task context is less likely to be
+retained and more likely to interfere with concurrent cognitive
+processes~\cite{wickens2008multiple}. Despite these insights, many assistive vision
+systems treat cognitive load as a secondary concern, addressed through ad hoc
+verbosity reduction rather than architectural mechanisms that regulate when
+perception is active and when information is delivered.
+
+Lumen treats cognitive load management as a first-class design objective at three
+levels: the task-scoped paradigm bounds \emph{when} the system may speak at all; a
+two-tier speech policy distinguishes priority announcements from droppable ambient
+nudges, so guidance never queues up and lags behind reality; and utterance merging
+ensures that no spoken line is ever interrupted by the next one.
+
+\section{Wearable Platforms and Voice-Based Interaction}
+\label{sec:wearable_voice}
+
+Wearable platforms --- smart glasses, head- or chest-mounted cameras, belt-worn
+systems --- have been the dominant form factor for assistive vision, as they enable
+hands-free sensing~\cite{tapu2014wearable, dakopoulos2010wearable}. Their design is
+constrained by size, weight, battery life, and computational resources; consequently,
+many systems offload processing to paired smartphones or cloud
+services~\cite{chen2015wearable}, trading local constraints for latency and
+connectivity challenges.
+
+Voice-based interaction has emerged as the natural control modality for such
+systems~\cite{porzi2018assistive}, but speech interfaces require careful design to
+avoid ambiguity, misrecognition, and dialogue overhead, particularly in noisy indoor
+environments. Moreover, many systems treat voice as a thin control layer mapping
+commands directly to isolated functions, with limited consideration of interaction
+flow, task progression, or system state.
+
+Lumen draws a pragmatic conclusion from this literature: the modern smartphone
+\emph{already is} the wearable --- camera, microphone, speaker, IMU, compass, and
+connectivity in one ubiquitous device --- and delivering the client as a web page
+removes even the app-install barrier. The engineering effort thus shifts from
+hardware to interaction structure: an explicit state machine governs how tasks are
+initiated, executed, interrupted, and terminated by voice.
+
+\section{System Architectures, Control Models, and Safety}
+\label{sec:architectures_control_safety}
+
+The effectiveness of assistive technologies depends not only on sensing accuracy and
+interaction modalities, but also on the underlying architecture that governs task
+execution, control flow, and error handling. Prior work commonly describes functional
+components --- perception, localization, feedback --- while leaving the coordinating
+control logic implicit~\cite{tapu2014wearable, dakopoulos2010wearable}. Many systems
+adopt reactive architectures where sensory inputs directly trigger
+responses~\cite{porzi2018assistive}; without explicit state, perception may remain
+active indefinitely, feedback may repeat unpredictably, and behavior under edge cases
+is hard to reason about.
+
+Safety and failure handling are particularly critical for blind users, for whom
+incorrect guidance has immediate physical consequences, yet most systems rely on ad
+hoc safeguards such as confidence thresholds~\cite{fernandes2019review}. In robotics
+and human--computer interaction, state-based control models --- finite state machines
+and their descendants --- have long provided deterministic behavior, clear task
+boundaries, and predictable recovery~\cite{brooks1986robust,
+colledanchise2018behavior}, but have seen limited adoption in assistive vision
+systems.
+
+Lumen adopts explicit state-machine control at both the session level and inside the
+navigation task, and extends the safety-first philosophy into perception itself:
+every navigation-critical percept must survive multiple independent checks (temporal
+consistency, geometric gates, semantic verification) before it is ever spoken to the
+user, and obstacle warnings preempt all other guidance while the user is walking.
+Because the decision logic is pure and clock-injected, these safety behaviors are not
+just design intentions --- they are verified by automated tests.
+
+\section{Summary and Research Gap}
+
+Across this literature, three gaps recur. First, interaction paradigms are polarized
+between continuous narration and reactive querying, with little work on structuring
+assistance around explicit, bounded tasks. Second, uninstrumented indoor navigation
+--- no maps, no beacons, no SLAM --- remains largely unaddressed for blind users,
+despite being the common case in homes and unfamiliar buildings. Third, control
+logic and safety handling are typically implicit, making system behavior unpredictable
+and unverifiable. Lumen's design responds to all three: task-scoped perception under
+an explicit FSM, goal-directed exploration navigation that fuses semantic room
+recognition with door detection and human hints, and a verification-first
+architecture whose behavioral guarantees are enforced by an automated test suite.

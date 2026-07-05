@@ -1,0 +1,233 @@
+% =========================
+% Chapter 4
+% =========================
+\chapter{System Design}
+\label{ch:system_design}
+
+\section{From Proposal to Final Design}
+\label{sec:design_evolution}
+
+The original project proposal envisioned a purpose-built wearable device --- camera,
+microphone, and speaker in a dedicated enclosure --- streaming to cloud services. Two
+realizations during development reshaped this design into its final, stronger form.
+
+First, \textbf{the smartphone already is the wearable}. A modern phone integrates
+every sensor the custom device would have carried --- camera, microphone, speaker,
+accelerometer, magnetometer --- in hardware that is mass-produced, familiar to the
+user, and already in their pocket. Building custom hardware would have reproduced
+this integration work at prototype quality while adding battery, enclosure, and
+connectivity problems that contribute nothing to the research questions.
+
+Second, \textbf{the browser removes the last installation barrier}. Delivering the
+client as a plain web page --- no app store, no APK, no platform approval --- means a
+user (or an evaluator) points their phone at a URL and the system works. The
+requirements this imposes (HTTPS for camera access, iOS audio unlock quirks,
+permission gestures) proved solvable, and are documented in
+Section~\ref{sec:frontend}.
+
+The navigation task evolved even more substantially. The proposal described
+\emph{collaborative waypoint identification}: the user names a sequence of landmarks,
+and the system walks them landmark to landmark. Early experimentation exposed the
+flaw: in an unfamiliar building, a blind user cannot name intermediate landmarks ---
+that is precisely the information they lack, and demanding it contradicts the
+cognitive-load motivation of the whole project. The final design inverts the
+responsibility: the user names only the \emph{destination}, and the system explores
+--- scanning each room, recognizing arrival semantically, choosing doors, and
+guiding the user through them. The user contributes what they genuinely have (coarse
+direction knowledge, confirmation of transit) rather than what they lack. What
+remains from the proposal is the deeper principle both designs share: perception
+scoped to an explicit task, under explicit state control.
+
+\section{Requirements}
+\label{sec:requirements}
+
+\subsection{Functional Requirements}
+\begin{itemize}[nosep]
+  \item \textbf{FR1} --- Voice-initiated tasks: the user starts, completes, and
+        aborts every task by voice (push-to-talk), with UI buttons as fallback.
+  \item \textbf{FR2} --- Object Allocation: locate a requested object from a curated
+        COCO vocabulary and guide the user to it with direction and distance cues.
+  \item \textbf{FR3} --- Reach Guidance: when the target is within arm's reach and a
+        hand is visible, guide the hand to the target and complete the task
+        automatically on touch.
+  \item \textbf{FR4} --- Navigation: guide the user to a named destination room
+        without maps or infrastructure, recognizing arrival from room-indicator
+        objects and traversing doors as needed.
+  \item \textbf{FR5} --- Obstacle warnings: while the user walks during navigation,
+        warn about objects and unnamed clutter in the walking lane, preempting all
+        other guidance.
+  \item \textbf{FR6} --- Information queries: ``describe'' the current view and
+        ``repeat'' the last utterance on demand during a task.
+  \item \textbf{FR7} --- Session continuity: an interrupted connection (dropped
+        Wi-Fi, page reload) resumes the active task on reconnect.
+\end{itemize}
+
+\subsection{Non-Functional Requirements}
+\begin{itemize}[nosep]
+  \item \textbf{NFR1} --- Zero install: the client is a web page; the only
+        client-side requirement is a modern browser.
+  \item \textbf{NFR2} --- Responsiveness: guidance must follow scene changes closely
+        enough to feel live (detection at ${\sim}3$--$5$\,FPS; spoken reaction
+        within ${\sim}1$--$2$\,s).
+  \item \textbf{NFR3} --- Speech discipline: no utterance may be cut off by another;
+        ambient guidance must never queue up and lag behind reality.
+  \item \textbf{NFR4} --- Trustworthy perception: nothing is spoken to the user
+        unless it survived temporal-consistency and (for doors) semantic
+        verification; false guidance is treated as a safety defect, not a cosmetic
+        one.
+  \item \textbf{NFR5} --- Testability: all decision logic must be executable without
+        cameras, models, or network, so behavior is verifiable in an automated
+        suite.
+  \item \textbf{NFR6} --- Cane-complementary: the system provides advance
+        information; it does not replace the white cane's ground-truth contact zone.
+\end{itemize}
+
+\section{Architecture Overview}
+\label{sec:architecture}
+
+Lumen is a thin-client / smart-server system connected by a single WebSocket
+(Figure~\ref{fig:architecture}). The browser client captures and forwards sensor
+data and plays back audio; it holds no task state. The backend owns everything else:
+speech recognition, command parsing, the session state machine, the per-task
+perception loops, and speech synthesis. Serving the frontend from the same process
+(same origin) means one tunnel or host exposes the entire system.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.98\textwidth}{!}{%
+\begin{tikzpicture}[node distance=6mm]
+  % Client side
+  \node[box, minimum width=44mm] (cam) {getUserMedia\\camera 640$\times$480};
+  \node[box, minimum width=44mm, below=of cam] (ptt) {MediaRecorder\\push-to-talk audio};
+  \node[box, minimum width=44mm, below=of ptt] (sens) {Motion + compass\\(IMU, magnetometer)};
+  \node[box, minimum width=44mm, below=of sens] (audio) {Audio queue\\primed \texttt{<audio>} (iOS)};
+  \node[draw, rounded corners=3pt, fit=(cam)(ptt)(sens)(audio), inner sep=4mm,
+        label={[font=\small\bfseries]above:Browser client (phone)}] (client) {};
+
+  % Server side
+  \node[box, minimum width=50mm, right=34mm of cam] (router) {Router + Session\\(one per connection)};
+  \node[box, minimum width=50mm, below=of router] (fsm) {Task FSM\\(authoritative state)};
+  \node[box, minimum width=50mm, below=of fsm] (tasks) {Task engines\\Object Allocation / Reach\\Navigation (exploration)};
+  \node[box, minimum width=50mm, below=of tasks] (svc) {Services: faster-whisper,\\parser, YOLOv8n/m, door models,\\MediaPipe, SegFormer, gTTS};
+  \node[draw, rounded corners=3pt, fit=(router)(fsm)(tasks)(svc), inner sep=4mm,
+        label={[font=\small\bfseries]above:FastAPI backend (single process)}] (server) {};
+
+  % WS link
+  \draw[arr, <->] (client.east) -- node[lbl, above]{WebSocket /ws}
+        node[lbl, below]{JSON + tagged binary\\0x01 JPEG frame $\rightarrow$\\0x02 PTT audio $\rightarrow$\\$\leftarrow$ 0x03 TTS MP3} (server.west);
+\end{tikzpicture}}
+\caption{System architecture: a sensing-only browser client and a single-process
+backend joined by one WebSocket carrying JSON control messages and tagged binary
+media.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Wire Protocol}
+\label{sec:protocol}
+
+One WebSocket carries two channels. \emph{Text frames} hold JSON control messages:
+lifecycle events (\texttt{user\_event}: start / stop / confirm), device sensing
+(\texttt{motion}: still / moving / walking; \texttt{heading}: compass degrees,
+throttled to ${\geq}2^\circ$ change at ${\leq}5$\,Hz), session resumption
+(\texttt{resume}), and, server-to-client, state pushes (\texttt{fsm\_state}),
+transcriptions, haptic cues, and errors. \emph{Binary frames} carry media, each
+prefixed by a one-byte tag: \texttt{0x01} JPEG camera frames (client$\to$server,
+${\sim}5$\,FPS), \texttt{0x02} WebM/Opus push-to-talk recordings
+(client$\to$server), and \texttt{0x03} MP3 speech clips (server$\to$client). The
+protocol is frozen and documented, and unknown messages are logged and ignored,
+which lets client and server evolve independently.
+
+\subsection{Session Model}
+
+Each WebSocket connection owns a \texttt{Session}: the FSM instance, the latest
+decoded frame and its timestamp, the latest motion state and compass heading, the
+task context (target object or destination), and a handle to the running task loop.
+There is no shared task state across users --- multi-user isolation is a property of
+the architecture. A resume pool preserves the active task for five minutes across
+disconnects: when the phone drops Wi-Fi mid-task and reconnects, the client presents
+its previous session id and the server re-fires the task with a spoken
+``Resuming\ldots'' announcement (FR7).
+
+\section{The Task Finite State Machine}
+\label{sec:fsm}
+
+\begin{figure}[H]
+\centering
+\resizebox{0.98\textwidth}{!}{%
+\begin{tikzpicture}[node distance=9mm and 16mm]
+  \node[state] (idle) {Idle};
+  \node[state, right=of idle] (listen) {Listening\\ForCommand};
+  \node[state, above right=of listen] (obj) {ObjectAllocation\\Active};
+  \node[state, below right=of listen] (nav) {Navigation\\Active};
+  \node[state, right=42mm of listen] (ret) {Returning\\ToIdle};
+
+  \draw[arr] (idle) -- node[lbl, above]{user\_start} (listen);
+  \draw[arr] (listen) -- node[lbl, above left]{command\_recognized\\(find X)} (obj);
+  \draw[arr] (listen) -- node[lbl, below left]{command\_recognized\\(navigate to Y)} (nav);
+  \draw[arr] (obj) -- node[lbl, above right]{task\_complete /\\user\_stop} (ret);
+  \draw[arr] (nav) -- node[lbl, below right]{task\_complete /\\user\_stop} (ret);
+  \draw[arr] (obj.west) to[bend right=12] node[lbl, above]{task\_abort} (listen.north);
+  \draw[arr] (nav.west) to[bend left=12] node[lbl, below]{task\_abort} (listen.south);
+  \draw[arr] (ret.south) to[bend left=22] node[lbl, below]{cleanup\_done} (idle.south);
+\end{tikzpicture}}
+\caption{The session FSM. Every transition is driven by an explicit event; the only
+autonomous transitions are \texttt{cleanup\_done} (one tick after entering
+ReturningToIdle) and \texttt{task\_complete} fired by a task engine on detected
+success (grasp, arrival).}
+\label{fig:fsm}
+\end{figure}
+
+The FSM is authoritative: the client renders whatever state the server pushes and
+maintains no state of its own. Entry and exit hooks on the two active states start
+and cancel the corresponding task engine's asynchronous loop, so a task can never
+outlive its state --- cancellation, completion, disconnection, and errors all funnel
+through the same teardown path. Reach Guidance runs as a phase \emph{inside}
+ObjectAllocationActive rather than as a separate FSM state, because the transition
+between far-field guidance and hand guidance is a perception decision (target near
+and hand visible), not a user decision.
+
+\section{Voice Interaction Design}
+\label{sec:voice_design}
+
+Push-to-talk, rather than an always-open microphone, keeps the user in control and
+sidesteps both privacy concerns and false activations. Utterances flow through
+faster-whisper, then the fuzzy command parser
+(Section~\ref{sec:command_parsing}), which classifies them as task commands
+(``find my cup'', ``navigate to the kitchen''), completions (``got it'' /
+``stop''), or information queries (``describe'', ``repeat that''). The parser's
+navigation vocabulary is deliberately kept in lockstep with the set of rooms the
+navigation engine can actually recognize --- a destination the parser accepts but
+the explorer cannot find would produce two contradictory spoken responses.
+
+Every accepted command is confirmed by voice (``Looking for your cup.''), every
+rejection prompts a retry (``I didn't catch that, please repeat.''), and every task
+end is announced. Haptic cues complement voice at key moments --- entering reach
+range, touching the target, task completion --- degrading silently on devices
+without a vibration API.
+
+\section{Safety Design}
+\label{sec:safety_design}
+
+Four principles govern safety-relevant behavior:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Never speak unverified perception.} Objects require temporal
+        consistency (3-of-5 frames in Object Allocation; localized sighting counts
+        in Navigation); doors additionally pass geometric gates and semantic
+        verification (Section~\ref{sec:door_funnel}).
+  \item \textbf{Obstacles preempt everything.} While the user is walking, the
+        obstacle watchdog's warnings override door guidance until the path clears.
+  \item \textbf{The camera is the odometer.} ``You walked through the door'' is
+        only ever inferred when sustained camera motion accompanies the visual
+        evidence --- detection flicker alone can never fake progress.
+  \item \textbf{Bounded autonomy.} Exploration checks in with the user after a
+        configurable number of rooms (``say stop anytime\ldots''), and a
+        whole-journey timeout guarantees the system never wanders indefinitely;
+        ``stop'' is honored from any state at any time.
+\end{enumerate}
+
+Lumen is designed as a complement to the white cane: the cane owns the contact zone
+(${\sim}1$\,m); Lumen's value is the 2--4\,m advance information --- where the door
+is, what is in the path, which room this is. This division of labor is communicated
+to users and maintained throughout the guidance phrasing, which directs attention
+and movement but never promises collision safety.

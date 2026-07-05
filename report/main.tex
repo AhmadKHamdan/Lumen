@@ -1,0 +1,151 @@
+\documentclass[12pt,a4paper]{report}
+
+% =========================
+% Packages
+% =========================
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\usepackage{geometry}
+\usepackage{setspace}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc}
+\usepackage{hyperref}
+\usepackage[backend=biber,style=ieee,sorting=none]{biblatex}
+
+% =========================
+% Settings / Setup
+% =========================
+\setmainlanguage{english}
+\setotherlanguage{arabic}
+\newfontfamily\arabicfont[Script=Arabic]{Amiri}
+\geometry{margin=1in}
+\onehalfspacing
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single
+}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue
+}
+\DefineBibliographyStrings{english}{
+  bibliography = {References}
+}
+\addbibresource{references.bib}
+
+% \tofill{...} marker for numbers the team must measure/confirm before submission.
+\newcommand{\tofill}[1]{\textcolor{red}{\textbf{[FILL: #1]}}}
+
+% Common TikZ styles for the architecture / state diagrams.
+\tikzset{
+  box/.style={draw, rounded corners=2pt, align=center, minimum height=9mm,
+              inner sep=5pt, font=\small},
+  state/.style={draw, rounded corners=8pt, align=center, minimum height=9mm,
+                inner sep=6pt, font=\small},
+  arr/.style={-{Stealth[length=2.5mm]}, thick},
+  lbl/.style={font=\scriptsize, align=center},
+}
+
+% =========================
+% Document begins
+% =========================
+\begin{document}
+
+% =========================
+% Title page
+% =========================
+\begin{titlepage}
+    \centering
+    \singlespacing
+
+    % Logo section
+    \includegraphics[width=0.8\textwidth]{pictures/bzu_logo.png}\\[1.5cm]
+
+    % University information
+    {\LARGE\textbf{Birzeit University}}\\[0.5cm]
+    {\Large\textbf{Faculty of Engineering \& Technology}}\\[0.3cm]
+    {\Large\textbf{Electrical \& Computer Engineering Department}}\\[0.5cm]
+    {\large\textbf{ENCS5300 -- Graduation Project}}\\[1.0cm]
+
+    % Project title
+    {\huge\textbf{Lumen: A Task-Oriented Assistive System for Blind People}}\\[1.0cm]
+
+    % Student information
+    {\Large\textbf{Prepared by:}}\\[0.6cm]
+    \begin{tabular}{c}
+        \textbf{Diaa Badaha} -- 1210478 \\[0.3cm]
+        \textbf{Ahmad Hamdan} -- 1210241 \\[0.3cm]
+        \textbf{Omar Husein} -- 1212738 \\
+    \end{tabular}\\[1.0cm]
+
+    {\Large\textbf{Supervised by:} Dr.\ Mohammad Husein}\\[0.5cm]
+    {\large\textbf{Section:} 9}\\[1.0cm]
+
+    \vfill
+    {\large A Graduation Project submitted to the Department of Electrical and
+    Computer Engineering in partial fulfillment of the requirements for the
+    degree of B.Sc.\ in Computer Engineering}\\[1.0cm]
+
+    {\large\textbf{Birzeit}}\\[0.2cm]
+    {\large\textbf{July, 2026}}
+\end{titlepage}
+
+\pagenumbering{roman}
+
+% -------- English Abstract --------
+\input{chapters/abstract}
+
+% -------- TOC, Lists --------
+\cleardoublepage
+\addcontentsline{toc}{chapter}{Table of Contents}
+\tableofcontents
+
+\cleardoublepage
+\addcontentsline{toc}{chapter}{List of Tables}
+\listoftables
+
+\cleardoublepage
+\addcontentsline{toc}{chapter}{List of Figures}
+\listoffigures
+
+\cleardoublepage
+\input{chapters/abbreviations}
+
+\newpage
+\pagenumbering{arabic}
+
+% =========================
+% Chapters
+% =========================
+\input{chapters/ch1_introduction}
+\input{chapters/ch2_background}
+\input{chapters/ch3_related_work}
+\input{chapters/ch4_system_design}
+\input{chapters/ch5_task_families}
+\input{chapters/ch6_implementation}
+\input{chapters/ch7_evaluation}
+\input{chapters/ch8_conclusion}
+
+% =========================
+% References
+% =========================
+\cleardoublepage
+\addcontentsline{toc}{chapter}{References}
+\printbibliography
+
+\end{document}

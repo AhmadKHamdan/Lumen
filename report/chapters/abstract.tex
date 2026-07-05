@@ -1,0 +1,61 @@
+% =========================
+% Abstracts
+% =========================
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{English Abstract}
+
+Visual impairment affects hundreds of millions of individuals worldwide, and indoor
+environments remain among the most difficult settings for independent mobility:
+satellite positioning is unavailable, layouts are unfamiliar, and traditional aids
+such as the white cane provide no information beyond arm's reach. Existing assistive
+vision systems tend to either narrate the scene continuously, overwhelming the user
+with a constant auditory stream, or answer isolated queries, forcing the user to know
+what to ask for in a space they cannot see. This work presents \textbf{Lumen}, a
+task-oriented assistive system that occupies the middle ground: perception activates
+only in response to an explicit spoken task, provides structured guidance until the
+task completes, and then returns to silence.
+
+Lumen requires no dedicated hardware and no application install. The user opens a web
+page on an ordinary smartphone; the browser streams camera frames, push-to-talk voice
+commands, and compass headings over a single WebSocket to a Python backend that runs
+the entire perception and speech stack: faster-whisper for speech recognition, a
+fuzzy command parser tolerant of transcription errors, YOLOv8 object detection,
+MediaPipe hand tracking, and server-side speech synthesis. A finite state machine
+governs every session, making task activation, completion, cancellation, and error
+recovery explicit and testable.
+
+The system supports three task families. \emph{Object Allocation} locates a requested
+object and guides the user toward it with direction and per-class distance cues.
+\emph{Reach Guidance} takes over at close range, steering the user's hand toward the
+target and completing the task automatically when the fingertip reaches it.
+\emph{Navigation} implements goal-directed exploration: the user names only a
+destination room, and Lumen guides them door-by-door --- a compass-anchored $360^\circ$
+room scan, semantic arrival detection from room-indicator objects, a three-layer door
+perception funnel built around a custom-trained door detector (mAP@50 $= 0.946$), a
+pinhole distance model that speaks in steps, doorway-transit detection, and an
+obstacle watchdog that fuses named-object detection with class-agnostic floor
+segmentation while the user walks.
+
+The decision logic of all three tasks is isolated from models and I/O and is verified
+by an automated suite of 286 tests, including scripted multi-room navigation
+journeys. Live trials in real apartments drove the perception design
+failure-by-failure, from curtain and blank-wall rejection to compass-confirmed scan
+completion. Lumen demonstrates that structured, task-scoped assistance --- perception
+aligned with user intent --- can be delivered on commodity hardware while respecting
+the cognitive load, autonomy, and safety of blind users.
+
+% -------- Arabic Abstract --------
+\cleardoublepage
+\selectlanguage{arabic}
+\chapter*{المستخلص}
+\addcontentsline{toc}{chapter}{Arabic Abstract}
+
+يؤثر ضعف البصر على مئات الملايين من الأشخاص حول العالم، وتبقى البيئات الداخلية من أصعب الأماكن للتنقل المستقل: فأنظمة تحديد المواقع غير متاحة داخل المباني، والمخططات غير مألوفة، والوسائل التقليدية مثل العصا البيضاء لا تقدم معلومات تتجاوز متناول الذراع. تميل أنظمة الرؤية المساعدة الحالية إما إلى وصف المشهد وصفاً متواصلاً يُغرق المستخدم بسيل سمعي دائم، أو إلى الإجابة عن استفسارات منفردة تُجبر المستخدم على معرفة ما يسأل عنه في مكان لا يستطيع رؤيته. يقدم هذا العمل نظام «لومن»، وهو نظام مساعد موجه بالمهام يحتل المنطقة الوسطى: إذ يُفعَّل الإدراك البصري فقط استجابةً لمهمة منطوقة صريحة، ويقدم إرشاداً منظماً حتى اكتمال المهمة، ثم يعود إلى الصمت.
+
+لا يتطلب «لومن» أي عتاد مخصص ولا تثبيت أي تطبيق؛ إذ يفتح المستخدم صفحة ويب على هاتف ذكي عادي، فيبث المتصفح إطارات الكاميرا والأوامر الصوتية واتجاه البوصلة عبر اتصال وِب سوكِت واحد إلى خادم بايثون يشغّل كامل منظومة الإدراك والكلام: التعرف على الكلام، ومحلل أوامر متسامح مع أخطاء النسخ، وكشف الأجسام بنموذج يولو، وتتبع اليد، وتوليد الكلام من جهة الخادم. وتحكم آلة حالات منتهية كل جلسة، مما يجعل تفعيل المهام وإكمالها وإلغاءها والتعافي من الأخطاء أموراً صريحة وقابلة للاختبار.
+
+يدعم النظام ثلاث عائلات من المهام: «تحديد موقع الأجسام» التي تجد الجسم المطلوب وترشد المستخدم نحوه بإشارات الاتجاه والمسافة، و«إرشاد الوصول» الذي يتولى المهمة عن قرب فيوجّه يد المستخدم نحو الهدف ويُكمل المهمة تلقائياً عند ملامسة أطراف الأصابع له، و«الملاحة» التي تطبق الاستكشاف الموجه بالهدف: يذكر المستخدم اسم الغرفة المقصودة فقط، فيرشده «لومن» من باب إلى باب عبر مسح دائري للغرفة مثبت بالبوصلة، وكشف الوصول الدلالي من الأجسام الدالة على الغرفة، ومنظومة إدراك أبواب ثلاثية الطبقات مبنية حول كاشف أبواب مدرب خصيصاً، ونموذج مسافة يتحدث بالخطوات، وكشف عبور المدخل، وحارس عوائق يدمج كشف الأجسام المسماة مع تقسيم أرضية المشهد أثناء سير المستخدم.
+
+جرى عزل منطق القرار في المهام الثلاث عن النماذج والمدخلات والمخرجات، ويجري التحقق منه عبر مجموعة آلية من 286 اختباراً تشمل رحلات ملاحة متعددة الغرف. وقد وجّهت التجارب الحية في شقق حقيقية تصميم الإدراك خطوةً بخطوة. يبرهن «لومن» على أن المساعدة المنظمة المحددة بالمهام يمكن تقديمها على عتاد شائع مع احترام الحمل المعرفي واستقلالية وسلامة المستخدمين المكفوفين.
+
+\selectlanguage{english}

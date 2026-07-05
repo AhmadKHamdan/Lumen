@@ -1,0 +1,208 @@
+% =========================
+% Chapter 1
+% =========================
+\chapter{Introduction and Motivation}
+\label{ch:introduction}
+
+\section{Motivation}
+\label{sec:motivation}
+
+Visual impairment affects approximately 2.2 billion people worldwide, including 39
+million who are completely blind~\cite{bourne2017global}. These numbers continue
+rising due to population growth and aging, making independent navigation a critical
+challenge for millions of individuals.
+
+Among the most pressing difficulties is indoor navigation, which remains largely
+unsolved despite significant advances in outdoor GPS-based
+systems~\cite{fernandes2019review}. The inability to navigate independently in
+unfamiliar indoor spaces --- offices, hospitals, shopping centers --- severely limits
+employment opportunities, social participation, and overall quality of life for blind
+individuals.
+
+Traditional mobility aids have inherent limitations. The white cane detects obstacles
+only within physical reach, missing overhead hazards and providing no advance
+warning~\cite{dakopoulos2010wearable}. Guide dogs, while effective, require extensive
+training, cost between \$15{,}000 and \$50{,}000, and are not suitable for all users
+due to various constraints~\cite{kandalan2020techniques}. Indoor environments further
+complicate navigation as building structures attenuate GPS signals, rendering them
+unreliable~\cite{li2018vision}.
+
+Recent electronic travel aids have attempted to address these challenges through
+continuous scene narration --- constantly verbalizing environmental information.
+However, this approach introduces a critical problem: cognitive overload. Users must
+process continuous auditory streams while simultaneously attending to ambient sounds,
+tactile feedback, and spatial reasoning~\cite{martinez2014cognitive}. Research shows
+this can be overwhelming and counterproductive, causing users to miss critical
+details.
+
+This tension between providing sufficient navigation information and avoiding
+cognitive overload motivates a different approach. Rather than continuous
+environmental description, a system can activate perception only when the user
+explicitly requests assistance for a specific task, guide that task to completion,
+and then fall silent. This task-oriented paradigm reduces cognitive load, preserves
+user control, and matches how blind individuals actually operate indoors: they do not
+want a running commentary --- they want to \emph{find the cup}, \emph{reach the
+kitchen}, or \emph{grasp the object in front of them}.
+
+\section{Problem Statement}
+\label{sec:problem_statement}
+
+Current assistive navigation systems for blind users typically fall into two
+categories, each with fundamental limitations. The first category comprises
+continuous narration systems that constantly describe the surrounding environment
+through audio feedback. These systems attempt to provide comprehensive scene
+understanding by continuously verbalizing detected objects, spatial relationships,
+and environmental changes. While this approach appears thorough, it creates severe
+cognitive load problems: users must simultaneously process continuous auditory
+information while attending to ambient sounds, tactile feedback from their mobility
+aids, and spatial reasoning~\cite{hossain2010cognitive}. Research on cognitive load
+in assistive technologies has demonstrated that this constant information flow can
+overwhelm users, leading to reduced task performance and increased mental fatigue.
+
+The second category consists of query-based systems where users must explicitly
+request information about specific aspects of their
+environment~\cite{li2018vision, khan2020insight}. While these systems reduce
+cognitive load by providing information only on demand, they introduce a different
+problem: users must know precisely what to ask for and when. In unfamiliar
+environments, blind users often cannot anticipate what information they need until it
+becomes critically necessary. This creates a reactive rather than proactive
+assistance paradigm, where users may miss important environmental cues simply because
+they did not know to query for them.
+
+Both approaches share a common limitation: they treat perception as either
+continuously active or completely passive. Continuous systems waste computational
+resources and overwhelm users with unnecessary information; query-based systems place
+the burden of managing perception entirely on the user. Neither aligns with how blind
+individuals naturally navigate --- performing specific tasks such as locating
+objects, reaching destinations, or avoiding obstacles, each with distinct information
+requirements and a clear beginning and end.
+
+What remains missing is a middle ground: a system that activates perception and
+provides guidance in response to explicit user-initiated tasks, but does so
+intelligently without requiring users to specify every detail. The core research
+challenge is designing an interaction paradigm and system architecture that enables
+\emph{task-scoped perception} --- where visual processing and guidance activate only
+during explicitly requested tasks, provide structured assistance toward task
+completion, and return to an idle state once the task concludes. A second challenge
+follows directly from it: for the hardest task family, indoor navigation, the system
+must guide a user to a destination room \emph{without maps, localization
+infrastructure, or prior knowledge of the building} --- using only what a phone
+camera sees and what the user can naturally contribute. This work addresses the
+research question: \textit{How can assistive navigation systems provide reliable,
+context-aware guidance while minimizing cognitive load through task-oriented
+perception activation?}
+
+\section{High-Level Methodology}
+\label{sec:high_level_methodology}
+
+To address the gap identified above, Lumen introduces a task-oriented assistive
+vision system that activates perception only in response to explicit user commands.
+The user opens a web page on an ordinary smartphone; no dedicated hardware and no
+application install are required. The phone's browser captures camera frames,
+push-to-talk voice commands, and compass headings, and streams them over a single
+WebSocket connection to a backend server that performs all computation: speech
+recognition, command parsing, object detection, hand tracking, spatial reasoning, and
+speech synthesis. Guidance returns to the user as synthesized voice, complemented by
+short haptic cues.
+
+The initial project proposal envisioned a purpose-built wearable device. During
+development this was deliberately replaced by the smartphone-browser architecture:
+the phone already integrates the camera, microphone, speaker, compass, and wireless
+connectivity that the wearable would have had to replicate, and serving the client as
+a web page eliminates manufacturing, installation, and platform-approval barriers
+entirely (Section~\ref{sec:design_evolution} details this evolution). The
+architectural principle is unchanged: a thin sensing client, with all intelligence in
+a server the client reaches over the network.
+
+The system organizes assistance into three task families:
+
+\begin{itemize}
+    \item \textbf{Object Allocation}: locates a requested item (``find my cup'') and
+          guides the user toward it with direction and distance cues derived from
+          per-class size priors.
+    \item \textbf{Reach Guidance}: once the object is within arm's reach, tracks the
+          user's hand and steers it to the target (``move your hand to the right
+          \ldots{} almost there''), completing the task automatically when the
+          fingertip reaches the object.
+    \item \textbf{Navigation}: guides the user to a destination room
+          (``navigate to the kitchen'') through \emph{goal-directed exploration}:
+          the system scans each room with a compass-anchored $360^\circ$ sweep,
+          recognizes arrival from room-indicator objects (a refrigerator and an oven
+          imply a kitchen), and otherwise walks the user to a detected door and
+          through it, room by room, warning about obstacles along the walking path.
+\end{itemize}
+
+A finite state machine (FSM) manages the system's operational states, ensuring
+perception activates only during explicit user tasks. Every transition is driven by
+an explicit event --- a voice command, a recognized completion, a cancellation, or a
+detected success --- making system behavior predictable, interpretable, and testable.
+
+\section{Contributions}
+\label{sec:contributions}
+
+The main contributions of this project are:
+
+\begin{itemize}
+    \item \textbf{Task-Scoped Perception Paradigm}: a task-oriented perception
+          paradigm that activates vision processing only during explicit user
+          commands, eliminating continuous cognitive load while maintaining
+          proactive assistance within each task.
+
+    \item \textbf{Goal-Directed Exploration Navigation Without Localization}: an
+          indoor navigation approach that requires no maps, markers, or SLAM. The
+          user names only the destination; the system explores door-by-door,
+          detects arrival semantically from room-indicator objects, and treats the
+          user as a direction oracle only when perception is genuinely ambiguous.
+
+    \item \textbf{A Safety-Hardened Door Perception Funnel}: a three-layer door
+          detection pipeline --- a custom-trained single-class door detector
+          (mAP@50 $=0.946$), geometric gates against walls and whole-scene false
+          positives, and a second 4-class model as a semantic verifier --- designed
+          failure-by-failure against real phone footage, because a false door
+          points a blind user at a wall.
+
+    \item \textbf{Zero-Install Commodity-Hardware Delivery}: the complete system
+          runs from a phone browser against a single Python server over one
+          WebSocket, with an iOS-compatible audio pipeline and tunnel-based HTTPS
+          deployment in minutes.
+
+    \item \textbf{FSM-Governed, Testable Assistive Architecture}: explicit
+          state-machine control of every session, with the decision logic of all
+          three task families isolated from models and I/O and verified by 286
+          automated tests, including scripted multi-room navigation journeys.
+\end{itemize}
+
+\section{Scope}
+\label{sec:scope}
+
+Lumen targets indoor residential and office-like environments: rooms connected by
+doors, containing everyday objects from the COCO vocabulary. Object Allocation
+supports a curated set of common object classes; Navigation supports six destination
+room types recognized by their characteristic objects (kitchen, bathroom, bedroom,
+living room, dining room, office). The system complements --- and explicitly does not
+replace --- the white cane: its value is advance information in the 2--4\,m range,
+not real-time collision avoidance. English voice interaction is supported. The
+demonstrated deployment serves one active user per task session, with the
+architecture designed for per-session isolation.
+
+\section{Report Outline}
+\label{sec:report_outline}
+
+The remainder of this report is organized as follows.
+\textbf{Chapter~\ref{ch:background}} provides the foundational concepts behind the
+system: object detection, speech recognition and synthesis, language understanding,
+and state-based control. \textbf{Chapter~\ref{ch:related_work}} surveys assistive
+vision systems, interaction paradigms, indoor navigation approaches, and control
+architectures, positioning Lumen within the research landscape.
+\textbf{Chapter~\ref{ch:system_design}} presents the system architecture: the
+client--server design, the wire protocol, the session model, and the finite state
+machine, including the design's evolution from the original wearable proposal.
+\textbf{Chapter~\ref{ch:task_families}} details the three task families and their
+algorithms --- Object Allocation, Reach Guidance, and goal-directed exploration
+Navigation, including the door detector training and the obstacle watchdog.
+\textbf{Chapter~\ref{ch:implementation}} describes the implementation: the technology
+stack, the per-session task engines, the speech pipeline, deployment, and the
+automated test infrastructure. \textbf{Chapter~\ref{ch:evaluation}} evaluates the
+system through model metrics, automated behavioral verification, and live trials, and
+discusses limitations. \textbf{Chapter~\ref{ch:conclusion}} concludes and outlines
+future work.

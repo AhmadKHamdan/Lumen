@@ -1,0 +1,159 @@
+% =========================
+% Chapter 2
+% =========================
+\chapter{Background}
+\label{ch:background}
+
+This chapter introduces the technical building blocks Lumen is assembled from: visual
+perception (object detection, spatial reasoning, segmentation, and depth), the voice
+pipeline (speech recognition, command understanding, speech synthesis), device
+sensing available to a web browser, and state-based system control.
+
+\section{Vision-Based Perception}
+
+\subsection{Object Detection}
+
+Vision-based object detection enables Lumen to perceive and interpret the surrounding
+environment by identifying relevant objects and estimating their spatial location
+from camera input. Modern object detectors process an input image to simultaneously
+predict object class labels and corresponding bounding boxes, allowing real-time
+localization and recognition within a single inference
+pipeline~\cite{girshick2015fast}. Among these approaches, one-stage detectors such as
+the You Only Look Once (YOLO) family are particularly suitable for assistive systems
+due to their low inference latency and unified detection formulation, which directly
+maps images to object predictions without intermediate proposal
+stages~\cite{redmon2016yolo}. The YOLOv8 family~\cite{jocher2023yolov8} spans a range
+of model sizes trading accuracy for speed, all pretrained on the COCO
+dataset~\cite{lin2014coco}, whose 80 everyday object classes (cup, chair,
+refrigerator, bed, \ldots) align well with the vocabulary of indoor assistive tasks.
+
+Lumen uses two YOLOv8 variants for two different jobs. \textbf{YOLOv8n} (nano, ${\sim}6$\,MB)
+serves Object Allocation, where the target classes are large in frame and the
+detection loop must run at ${\sim}5$\,FPS even on CPU. \textbf{YOLOv8m} (medium)
+serves Navigation, where the decisive factor is recall on room-indicator objects seen
+at an angle and across a room --- detection accuracy, not inference time, is the
+bottleneck there. In addition, Navigation uses two custom-trained YOLOv8 door models
+(Section~\ref{sec:door_model}), since COCO contains no door class.
+
+\subsection{Relative Spatial Reasoning}
+
+Bounding boxes alone do not tell a blind user anything actionable; they must be
+translated into egocentric guidance. Lumen infers the target's horizontal
+\emph{region} (left / center / right) from the box centre, and a coarse
+\emph{distance} bucket (near / medium / far) from the box's apparent size. Because
+apparent size conflates true size with distance, Lumen applies \emph{per-class size
+priors}: a laptop occupying 40\% of the frame width is near, and a cup occupying 18\%
+is equally near, because cups are small. Qualitative spatial representations of this
+kind have been shown sufficient for indoor assistive guidance, where approximate
+awareness --- not metric depth --- drives safe and intuitive
+instructions~\cite{liu2019spatial}. Where metric distance genuinely matters --- how
+many steps to a door --- Lumen instead uses a pinhole-camera model over a known
+object height (Section~\ref{sec:door_distance}).
+
+\subsection{Semantic Segmentation and Monocular Depth}
+
+Object detectors can only report objects they have a name for, yet the clutter that
+actually litters floors --- clothes piles, boxes, bins --- is largely absent from
+detection vocabularies. Two class-agnostic perception tools close this gap.
+\emph{Semantic segmentation} labels every pixel with a scene category; transformer
+architectures such as SegFormer~\cite{xie2021segformer}, trained on the ADE20K scene
+dataset~\cite{zhou2017ade20k}, can classify floor, rug, wall, and door pixels in real
+time. This turns the question ``is there an obstacle?'' into the more tractable ``is
+the strip of floor I am about to walk on still floor?''. \emph{Monocular depth
+estimation} models such as Depth Anything V2~\cite{yang2024depthanything} predict
+relative per-pixel depth from a single image, enabling a complementary tripwire
+signal: a patch of the walking lane that reads much nearer than the floor beside it
+is an intrusion. Lumen's obstacle watchdog (Section~\ref{sec:obstacles}) uses floor
+segmentation as its primary class-agnostic signal, with the depth tripwire retained
+as an alternative.
+
+\subsection{Hand Pose Estimation}
+
+Reach Guidance requires knowing where the user's hand --- specifically the fingertip
+--- is relative to the target object. MediaPipe Hands~\cite{zhang2020mediapipe}
+provides 21 three-dimensional hand landmarks from a monocular camera in real time on
+CPU, with models compact enough to ship inside the library itself. Lumen uses the
+index fingertip and wrist landmarks to compute hand-to-target guidance and to detect
+the moment the fingertip enters the target's bounding box.
+
+\section{Speech-to-Text (STT)}
+
+Speech-to-Text serves as the primary input modality in voice-driven assistive
+systems, converting spoken commands into text for downstream interpretation. This
+enables hands-free interaction, which is essential for users who cannot rely on
+visual interfaces~\cite{graves2013speech}. A typical STT pipeline consists of audio
+capture, acoustic feature extraction, and neural
+transcription~\cite{hinton2012deep}.
+
+Lumen adopts Whisper~\cite{radford2022whisper} as its recognition model, in the
+CTranslate2-based \emph{faster-whisper} implementation, which runs the same weights
+several times faster on CPU. Whisper is trained on large-scale, diverse audio,
+yielding robust transcription across accents, speaking styles, and background noise
+--- the conditions of real households. Robustness matters more than vocabulary here:
+Lumen's utterances are short imperative commands, and the transcription errors that
+do occur (``find my cop'' for \emph{cup}, ``fone'' for \emph{phone}) are handled
+downstream by the command parser rather than by widening the recognition
+model~\cite{li2017robust}.
+
+\section{Language Understanding}
+\label{sec:command_parsing}
+
+After transcription, the text must be mapped to an explicit system action. Large
+language models offer great flexibility for this mapping~\cite{brown2020language},
+but assistive systems demand deterministic, low-latency, and auditable behavior;
+misinterpreting a command has physical consequences. Lumen therefore uses a
+constrained command parser built on fuzzy string matching: every possible
+(prefix, target) split of the utterance is scored against known command templates
+(``find my \ldots'', ``navigate to the \ldots'') and known target vocabularies, with
+synonym and mishearing normalization applied first. This follows the long-standing
+insight from task-oriented dialog systems that a limited, well-defined intent
+schema yields reliable and predictable interaction~\cite{tur2011spoken,
+williams2013dialog}. Completion phrases (``got it'', ``stop'') and information
+queries (``describe'', ``repeat that'') are recognized the same way during active
+tasks.
+
+\section{Text-to-Speech (TTS)}
+
+Text-to-Speech completes the closed interaction loop, delivering guidance in auditory
+form --- the primary output channel for blind users~\cite{preece2015interaction}.
+Modern neural pipelines synthesize natural speech from text in a single
+architecture~\cite{wang2017tacotron}; classical parametric synthesis research
+established the clarity and latency requirements that interactive systems must
+meet~\cite{zen2009parametric}. Lumen uses Google's gTTS service, which produces
+consistent, natural MP3 audio~\cite{googlecloudtts}. Two engineering measures adapt a
+cloud TTS service to real-time guidance: synthesized clips are cached in a bounded
+LRU keyed by exact text (guidance phrases repeat constantly), and synthesis runs in a
+background speech queue so that network latency never stalls perception
+(Section~\ref{sec:speech_pipeline}). Assistive TTS additionally demands
+\emph{discipline} over \emph{quantity}: Lumen enforces a two-tier speech policy in
+which priority announcements always play, while ambient nudges are dropped rather
+than queued whenever the audio pipe is busy.
+
+\section{Browser Device Sensing}
+
+Delivering the client as a web page constrains sensing to what browsers expose ---
+and modern browsers expose enough. \texttt{getUserMedia} provides camera frames and
+microphone audio (requiring HTTPS outside localhost); \texttt{MediaRecorder}
+captures push-to-talk utterances; \texttt{DeviceMotionEvent} reports coarse
+accelerometer activity, which Lumen classifies into still / moving / walking;
+\texttt{DeviceOrientationEvent} reports the compass heading that anchors the
+navigation room scan; the Vibration API delivers haptic cues; and the Wake Lock API
+keeps the screen (and thus the camera) alive. iOS Safari imposes additional
+constraints --- sensor permissions must be requested from within a user gesture, and
+audio playback must be unlocked by a user action --- which shaped the client's
+startup sequence (Section~\ref{sec:frontend}).
+
+\section{State-Based System Control}
+
+Finite state machines provide deterministic behavior, clear task boundaries, and
+predictable recovery --- properties long exploited in robotics control
+architectures~\cite{brooks1986robust} and their modern successors such as behavior
+trees~\cite{colledanchise2018behavior}. In Lumen, an explicit FSM is the authority on
+what the system is doing at every moment: idle, listening for a command, executing a
+specific task, or returning to idle. Perception runs only inside active task states,
+which is precisely what implements the task-scoped paradigm; the FSM's explicit
+transitions are also what make the system testable, since every behavioral claim can
+be phrased as ``event X in state Y produces state Z and utterance W''. The
+exploration navigation task nests a second, task-internal state machine (scan, face
+target, approach door, confirm arrival) beneath the session FSM, following the same
+principle at a finer grain.

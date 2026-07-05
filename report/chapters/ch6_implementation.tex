@@ -1,0 +1,132 @@
+% =========================
+% Chapter 6
+% =========================
+\chapter{Implementation}
+\label{ch:implementation}
+
+\section{Technology Stack}
+
+\begin{table}[H]
+\centering
+\caption{Technology choices and their rationale.}
+\label{tab:stack}
+\begin{tabular}{p{3.2cm} p{3.6cm} p{7.2cm}}
+\toprule
+\textbf{Layer} & \textbf{Choice} & \textbf{Why} \\
+\midrule
+Server & FastAPI + uvicorn & Async WebSockets, single process serves API, WS, and frontend same-origin. \\
+STT & faster-whisper (base) & Whisper weights on a CTranslate2 backend: ${\sim}4\times$ faster on CPU, no heavyweight framework dependency. \\
+Audio decode & PyAV & Bundles FFmpeg in the wheel --- no system dependency for decoding PTT audio. \\
+Detection (objects) & YOLOv8n & ${\sim}6$\,MB, CPU-real-time at 5\,FPS, COCO classes match the task vocabulary. \\
+Detection (navigation) & YOLOv8m + 2 custom door models & Recall on indicators at angle/distance is the bottleneck; door models fill COCO's missing class. \\
+Floor segmentation & SegFormer-B0 (ADE20K) & Real-time per-pixel walkability for the obstacle lane; optional --- degrades to named objects only. \\
+Hand pose & MediaPipe Hands & 21 landmarks, CPU real-time, models bundled. \\
+TTS & gTTS + LRU cache & Natural voice; caching hides latency for the fixed guidance phrases. \\
+Command parsing & rapidfuzz & Structural prefix+noun fuzzy matching tolerates Whisper mishearings. \\
+Frontend & Vanilla HTML/JS & No build step; one less moving part; served by the backend itself. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Backend Organization}
+
+The backend is a single Python process organized in four layers.
+\textbf{API layer} (\texttt{api/}): the WebSocket router dispatches JSON control
+messages and tagged binary frames; the frame handler decodes JPEGs to arrays; the
+audio handler runs the PTT pipeline (decode $\to$ transcribe $\to$ parse $\to$ FSM
+event $\to$ spoken confirmation); the session object owns per-connection state.
+\textbf{FSM layer} (\texttt{fsm/}): the five-state task machine with explicit
+transitions and subscriber hooks. \textbf{Services layer} (\texttt{services/}):
+speech, parsing, detection, hand pose, spatial reasoning, and guidance generation as
+stateless, individually testable modules. \textbf{Task engines}: Object Allocation
+(with Reach Guidance) and the Navigation package
+(\texttt{services/navigation/}), each an asynchronous per-session loop started and
+cancelled by FSM entry/exit hooks.
+
+\section{The Per-Session Navigation Engine}
+\label{sec:nav_engine}
+
+The navigation package separates concerns strictly: \texttt{config.py} holds every
+tuning constant in one place, each annotated with the failure that motivated its
+value; \texttt{goals.py} the destination model; \texttt{perception.py} the door
+funnel; \texttt{geometry.py} the compass and bearing mathematics;
+\texttt{obstacles.py} the watchdog; \texttt{controller.py} the pure decision layer;
+\texttt{models.py} lazy, thread-safe model loading shared across sessions; and
+\texttt{engine.py} the asynchronous loop wiring them together. All mutable state
+lives in a per-session \texttt{NavState} object, so concurrent users cannot
+interfere --- a deliberate upgrade from the single-user prototype in which this
+logic was first field-tested.
+
+Three timing decisions matter for correctness. First, the engine measures each
+tick's real duration and passes it to the controller, whose pacing constants are
+expressed in \emph{seconds of observed frames} --- so timers keep their tuned
+meaning regardless of load, and evidence thresholds (which are counts of
+consecutive observations) remain counts. Second, the tick duration is clamped:
+time during a stall contains no frames and therefore is not evidence that anything
+appeared or disappeared. Third, a frozen-feed guard skips any frame that is stale
+or already processed --- a locked screen or dropped connection can never accumulate
+``evidence'' from a frozen image.
+
+\section{The Speech Pipeline}
+\label{sec:speech_pipeline}
+
+Guidance text reaches the user through a per-session speech queue drained by a
+dedicated worker: the perception loop enqueues and moves on, so TTS synthesis
+latency never stalls detection or distorts its timers. The two-tier policy from
+Section~\ref{sec:speech_discipline} is enforced at the queue: priority lines always
+enqueue; ambient lines are dropped unless the pipe is idle. Synthesized MP3s are
+cached in a bounded LRU keyed by exact text; at server startup an optional preload
+warms both the navigation models and the fixed guidance phrases, so the first
+navigation command of a session answers immediately and the common utterances
+survive network hiccups. On the client, clips play through a single persistent,
+gesture-primed \texttt{<audio>} element --- the pattern required for autoplaying
+synthesized speech on iOS Safari.
+
+\section{Frontend}
+\label{sec:frontend}
+
+The client is deliberately thin: five small JavaScript modules coordinate the
+WebSocket, media capture (640$\times$480 JPEG at 5\,FPS; MediaRecorder for PTT),
+the audio queue, a wake lock, a device-motion classifier (still / moving /
+walking), and a compass monitor (throttled headings for the navigation scan). iOS
+imposes the notable constraints: motion and orientation permissions must be
+requested inside the Start button's click gesture, and audio must be unlocked by
+playing a primed silent clip in that same gesture. The entire session UI is
+voice-first --- the screen shows connection state, FSM state, and the last
+transcription, but no interaction beyond Start, Stop, and the tap-anywhere
+push-to-talk surface is required.
+
+\section{Deployment}
+\label{sec:deployment}
+
+The backend serves the frontend same-origin, so a single HTTPS endpoint exposes the
+whole system. For development and demos, a Cloudflare quick tunnel provides a real
+HTTPS URL in one command --- necessary because browsers permit camera and
+microphone access only over HTTPS (or localhost):
+
+\begin{lstlisting}
+cd backend && uvicorn main:app --port 8000
+cloudflared tunnel --url http://localhost:8000
+\end{lstlisting}
+
+The phone opens the printed URL; no certificates, DNS, or router configuration are
+involved. The heavyweight models load lazily on first use (or eagerly via the
+preload flag); the custom door detector and verifier weights are committed to the
+repository so a fresh clone runs the complete system.
+
+\section{Test Infrastructure}
+\label{sec:test_infrastructure}
+
+All decision logic is written as pure, clock-injected code: trackers and controllers
+receive detections, timestamps, and tick durations as arguments and return actions
+and phrases --- no I/O, no models, no global clock. This is what makes the 286-test
+suite possible: FSM transitions, command parsing across 50+ realistic transcriptions
+(including mishearings), spatial bucketing with per-class priors, reach-guidance
+state transitions, the Object Allocation tracker end-to-end with scripted frames and
+a fake clock, the navigation goal model and arrival rules, the compass/bearing
+mathematics (including the $\pm180^\circ$ seam), and complete scripted navigation
+journeys --- scan, door choice, approach, obstacle preemption, doorway transit, new
+room, semantic arrival --- run entirely from faked perception. The suite avoids
+loading any ML model and completes in under one second, so it runs on every change.
+Heavy perception (the door funnel against real pixels) is validated by the live
+trials of Chapter~\ref{ch:evaluation}.

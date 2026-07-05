@@ -88,3 +88,16 @@ door_training/runs/detect/door_yolov8s_4cls/*
 !door_training/runs/detect/door_yolov8s_4cls/weights/
 door_training/runs/detect/door_yolov8s_4cls/weights/*
 !door_training/runs/detect/door_yolov8s_4cls/weights/best.pt
+
+# ---- LaTeX report build artifacts ----
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+report/*.lof
+report/*.lot
+report/*.bbl
+report/*.bcf
+report/*.blg
+report/*.run.xml
+report/preview-sandbox.pdf
