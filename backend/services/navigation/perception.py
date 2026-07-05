@@ -13,6 +13,7 @@ to say) is the controller's job.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
@@ -24,6 +25,8 @@ from .config import (ASSUMED_HFOV_DEG, CONF, DIST_CAL, DOOR_CONF, DOOR_DEBUG,
                      DOOR_MAX_WH, DOOR_OBJ_IOU, DOOR_STRONG_CONF, MIN_HITS,
                      OBSTACLE_CLASSES, STEP_LENGTH_M, VERIFY_CONF, VERIFY_IOU)
 from . import models
+
+log = logging.getLogger("lumen.nav.perception")
 
 
 # --- small geometric helpers ----------------------------------------------------
@@ -105,8 +108,8 @@ def perceive_objects(st, img, w: int, h: int, indicators: set):
             ofrac = ((oxy[2] - oxy[0]) * (oxy[3] - oxy[1])) / float(w * h)
             if ofrac > DOOR_MAX_FRAME_FRAC:
                 if DOOR_DEBUG:
-                    print(f"[obj] {ocls} conf={oconf:.2f} fill={ofrac:.2f} "
-                          "-> reject (whole-frame latch)", flush=True)
+                    log.debug(f"[obj] {ocls} conf={oconf:.2f} fill={ofrac:.2f} "
+                          "-> reject (whole-frame latch)")
                 continue
         obj_dets.append((ocls, oconf, oxy))
 
@@ -154,8 +157,8 @@ def process_doors(st, img, w: int, h: int, obj_dets):
             if bh > 0 and wh <= DOOR_MAX_WH and not too_big:
                 door_cands.append((conf, xy, dens))  # pending semantic verification below
             elif DOOR_DEBUG:
-                print(f"[door] conf={conf:.2f} edge={dens:.3f} wh={wh:.2f} "
-                      f"fill={frame_frac:.2f} -> reject (geometry)", flush=True)
+                log.debug(f"[door] conf={conf:.2f} edge={dens:.3f} wh={wh:.2f} "
+                      f"fill={frame_frac:.2f} -> reject (geometry)")
         elif cname == "refrigerator door":
             obj_dets.append(("refrigerator", conf, xy))  # corroborates the fridge
 
@@ -198,9 +201,8 @@ def process_doors(st, img, w: int, h: int, obj_dets):
             # (the verifier seeing a door or a handle there) passes it.
             ok = corro
         if DOOR_DEBUG:
-            print(f"[door] conf={conf:.2f} edge={dens:.3f} corro={corro} "
-                  f"fridge_like={fridge_like} -> {'KEEP' if ok else 'reject (verify)'}",
-                  flush=True)
+            log.debug(f"[door] conf={conf:.2f} edge={dens:.3f} corro={corro} "
+                      f"fridge_like={fridge_like} -> {'KEEP' if ok else 'reject (verify)'}")
         if ok:
             door_dets.append((conf, xy, corro))  # keep corro: corroborated = strong evidence
         # NOTE: a fridge_like rejection does NOT become a refrigerator sighting.
@@ -226,8 +228,8 @@ def process_doors(st, img, w: int, h: int, obj_dets):
                     and any(_iou(oxy, dxy) >= DOOR_OBJ_IOU for _dc, dxy, _dd in door_cands)
                     and not any(_iou(oxy, fb) >= VERIFY_IOU for fb in vfridge)):
                 if DOOR_DEBUG:
-                    print(f"[door] COCO fridge conf={ocf:.2f} on a door candidate, "
-                          "no 'refrigerator door' backup -> dropped (it's the door)", flush=True)
+                    log.debug(f"[door] COCO fridge conf={ocf:.2f} on a door candidate, "
+                          "no 'refrigerator door' backup -> dropped (it's the door)")
                 continue
             kept_objs.append((cls, ocf, oxy))
         obj_dets = kept_objs
@@ -305,9 +307,8 @@ def door_geometry(st, door_dets, vdoor, w: int, h: int) -> DoorGeom:
         dist_m = _door_distance_m(meas_h, w, h)
         cur_frac = (bx[3] - bx[1]) / h  # how much of the frame height the door fills
         if DOOR_DEBUG and dist_m is not None:
-            print(f"[dist] box_h={meas_h:.0f}px (raw {bx[3] - bx[1]:.0f}) frame={w}x{h} "
-                  f"-> {dist_m:.1f} m (~{max(1, round(dist_m / STEP_LENGTH_M))} steps)",
-                  flush=True)
+            log.debug(f"[dist] box_h={meas_h:.0f}px (raw {bx[3] - bx[1]:.0f}) frame={w}x{h} "
+                      f"-> {dist_m:.1f} m (~{max(1, round(dist_m / STEP_LENGTH_M))} steps)")
     else:
         region, dist_m, cur_frac, door_cx_frac = None, None, 0.0, None
     st.door_hist.append((region, dist_m) if region else None)

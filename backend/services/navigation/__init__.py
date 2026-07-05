@@ -31,7 +31,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("lumen.task.navigation")
 
-__all__ = ["start", "stop", "resolve_goal", "is_known_goal"]
+__all__ = ["start", "stop", "resolve_goal", "is_known_goal",
+           "preload_in_background"]
 
 
 def start(session: "Session", destination: str) -> None:
@@ -58,3 +59,63 @@ def _cancel_existing(session: "Session") -> None:
     if task is not None and not task.done():
         task.cancel()
     session.detection_task = None
+
+
+def preload_in_background() -> None:
+    """Warm the slow paths before the first user speaks (opt-in via the
+    LUMEN_NAV_PRELOAD env var - see main.py):
+
+    - load + warm the navigation models (first-ever run also downloads
+      YOLOv8m ~50 MB and SegFormer-B0 ~15 MB), so the first "navigate to..."
+      doesn't sit in a minute of silence;
+    - pre-synthesize the FIXED guidance phrases into the TTS LRU cache, so
+      demo-day wifi hiccups can't silence the common lines. Best effort: any
+      failure is logged and ignored (dynamic phrases still synthesize live).
+
+    The phrase list mirrors controller.py's fixed strings; drift only costs a
+    cache miss, never a wrong utterance.
+    """
+    import threading
+
+    def _work() -> None:
+        try:
+            from . import models
+            models.ensure_loaded()
+        except Exception:
+            log.exception("Navigation model preload failed (will retry lazily)")
+        try:
+            from services import tts_service
+            from .goals import GOAL_INDICATORS
+            fixed = [
+                "Give me a moment while I get ready.",
+                "Slow down. Move the phone slowly.",
+                "Keep scanning.",
+                "Good, keep scanning.",
+                "Almost done — keep turning until you face where you started.",
+                "I don't see a door yet. Keep scanning the room slowly.",
+                "Still looking for a door. Keep moving the camera around the room.",
+                "No door yet — keep scanning the walls slowly.",
+                "Okay, the way ahead is clear.",
+                "You're right at the door. Reach out with your hand, open it, "
+                "walk through the doorway, and take two or three steps into the room.",
+                "You're through. Now slowly turn to your right, all the way "
+                "around, until you are facing where you started, so I can scan "
+                "this room.",
+            ] + [
+                f"Looking for the {g}. Let's scan the room — slowly turn to "
+                "your right, all the way around, until you are facing where "
+                "you started."
+                for g in GOAL_INDICATORS
+            ]
+            for phrase in fixed:
+                try:
+                    tts_service.synthesize(phrase)
+                except Exception:
+                    log.warning("TTS warmup failed at %r - offline? Stopping "
+                                "warmup; live synthesis unaffected.", phrase[:40])
+                    break
+            log.info("Navigation preload complete (%d phrases cached).", len(fixed))
+        except Exception:
+            log.exception("TTS warmup failed")
+
+    threading.Thread(target=_work, name="lumen-nav-preload", daemon=True).start()

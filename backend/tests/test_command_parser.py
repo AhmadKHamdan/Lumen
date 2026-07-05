@@ -55,11 +55,11 @@ def test_object_allocation_clean_phrases(text, expected_target):
     ("navigate to the kitchen", "kitchen"),
     ("navigate to bathroom", "bathroom"),
     ("take me to the bedroom", "bedroom"),
-    ("take me to the exit", "exit"),
+    ("take me to the living room", "living room"),
     ("go to the office", "office"),
     ("go to dining room", "dining room"),
-    ("lead me to the hallway", "hallway"),
-    ("guide me to the door", "door"),
+    ("lead me to the bathroom", "bathroom"),
+    ("guide me to the bedroom", "bedroom"),
 ])
 def test_navigation_clean_phrases(text, expected_target):
     result = parse(text)
@@ -113,8 +113,8 @@ def test_object_synonyms(text, expected_target):
 @pytest.mark.parametrize("text, expected_target", [
     ("take me to the restroom", "bathroom"),
     ("go to the lounge", "living room"),
-    ("guide me to the doorway", "door"),
-    ("navigate to the staircase", "stairs"),
+    ("take me to the washroom", "bathroom"),
+    ("navigate to the lounge", "living room"),
 ])
 def test_navigation_synonyms(text, expected_target):
     result = parse(text)

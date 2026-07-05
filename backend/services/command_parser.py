@@ -106,8 +106,11 @@ OBJECT_NOUNS: tuple[str, ...] = (
     "scissors",
 )
 
-# Navigation destinations (room labels - Sprint 4 will use COCO furniture
-# as proxy landmarks since COCO doesn't include rooms).
+# Navigation destinations. Deliberately EXACTLY the rooms that
+# services/navigation/goals.py has arrival-indicator tables for - a destination
+# the parser accepts but the explorer can't recognise would produce two
+# contradictory voice lines ("Navigating to the hallway." ... "I don't know how
+# to find the hallway yet."). Keep the two lists in lockstep.
 NAVIGATION_DESTINATIONS: tuple[str, ...] = (
     "kitchen",
     "bathroom",
@@ -115,10 +118,6 @@ NAVIGATION_DESTINATIONS: tuple[str, ...] = (
     "living room",
     "dining room",
     "office",
-    "hallway",
-    "exit",
-    "door",
-    "stairs",
 )
 
 # Synonyms / common mishearings -> canonical name. Applied before fuzzy match
@@ -143,10 +142,6 @@ SYNONYMS: dict[str, str] = {
     "loo": "bathroom",
     "lounge": "living room",
     "study": "office",
-    "way out": "exit",
-    "doorway": "door",
-    "staircase": "stairs",
-    "stairway": "stairs",
 }
 
 

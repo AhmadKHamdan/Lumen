@@ -13,6 +13,8 @@ door guidance for that frame (safety first).
 """
 from __future__ import annotations
 
+import logging
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -24,6 +26,8 @@ from .config import (CORRIDOR_X, DEPTH_AREA_FRAC, DEPTH_FAR_ROWS, DEPTH_FLAT_MIN
                      OBST_MIN_H_FRAC, OBST_MIN_OVERLAP, OBST_NAMES, OBST_REPROMPT_SEC,
                      OBST_SIGNAL)
 from . import models
+
+log = logging.getLogger("lumen.nav.obstacles")
 
 
 def _depth_map(img):
@@ -69,7 +73,7 @@ def _depth_tripwire(d):
     intrude = (centre - side_floor) > DEPTH_REL_MARGIN  # nearer than the floor at that row
     frac = float(intrude.mean())
     if DOOR_DEBUG:
-        print(f"[depth] near={near_ref:.0f} far={far_ref:.0f} intrude={frac:.2f}", flush=True)
+        log.debug(f"[depth] near={near_ref:.0f} far={far_ref:.0f} intrude={frac:.2f}")
     if frac < DEPTH_AREA_FRAC:
         return None
     half = intrude.shape[1] // 2  # step away from the half where the intrusion sits
@@ -99,8 +103,8 @@ def _floor_tripwire(img):
     lcov = float(left.mean()) if left.size else 0.0
     rcov = float(right.mean()) if right.size else 0.0
     if DOOR_DEBUG:
-        print(f"[floor] lane={cover:.2f} L={lcov:.2f} R={rcov:.2f}"
-              f"{'' if cover >= FLOOR_MIN_COVER else ' -> blocked'}", flush=True)
+        log.debug(f"[floor] lane={cover:.2f} L={lcov:.2f} R={rcov:.2f}"
+              f"{'' if cover >= FLOOR_MIN_COVER else ' -> blocked'}")
     if cover >= FLOOR_MIN_COVER:
         return None
     return "left" if lcov >= rcov else "right"
@@ -151,7 +155,7 @@ def _obstacle_watchdog(st, obstacle_dets, unnamed_side, w: int, h: int, dt: floa
             # becomes the path verdict right after. Calm tone, never a barked "Stop".
             return "", False, True
         if DOOR_DEBUG:
-            print(f"[obst] {what} -> blocking, step {side}", flush=True)
+            log.debug(f"[obst] {what} -> blocking, step {side}")
         if not st["obst_active"]:
             st["obst_active"] = True
             st["obst_cool"] = OBST_REPROMPT_SEC

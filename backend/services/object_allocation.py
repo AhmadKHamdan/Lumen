@@ -78,6 +78,12 @@ REACH_REAFFIRM_SEC = 5.0
 # MediaPipe momentarily fails to detect the hand between two good frames.
 REACH_GRACE_SEC = 3.0
 
+# Frozen-feed guard (same rationale as the navigation engine's): if the phone
+# stops sending frames, re-analysing the stale image would keep re-confirming a
+# detection that may no longer be in front of the user. A stale frame is
+# treated as no frame - the tracker then ages it out via its presence window.
+FRAME_STALE_SEC = 2.0
+
 
 class GuidanceTracker:
     """Pure decision state machine for Object Allocation guidance.
@@ -376,6 +382,10 @@ async def _run(session: "Session", target: str) -> None:
             now = time.monotonic()
 
             frame = session.latest_frame
+            frame_at = session.latest_frame_at
+            if (frame is not None and frame_at is not None
+                    and (time.time() - frame_at) > FRAME_STALE_SEC):
+                frame = None   # feed frozen -> no observation this tick
             detections: list = []
             if frame is not None and getattr(frame, "size", 0):
                 try:

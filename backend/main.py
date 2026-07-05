@@ -29,6 +29,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
+import os
+
 from api.session import Session
 
 
@@ -58,6 +60,19 @@ logging.basicConfig(
 log = logging.getLogger("lumen.main")
 
 app = FastAPI(title="Lumen Backend", version="0.1.0")
+
+
+@app.on_event("startup")
+def _maybe_preload_navigation() -> None:
+    """Opt-in warmup: LUMEN_NAV_PRELOAD=1 loads the navigation models and
+    pre-synthesizes the fixed guidance phrases in a background thread at
+    startup, so the FIRST "navigate to..." answers immediately instead of
+    downloading/initializing for up to a minute. Off by default - development
+    restarts (--reload) shouldn't pay the load on every code change."""
+    if os.getenv("LUMEN_NAV_PRELOAD", "").strip().lower() in ("1", "true", "yes"):
+        from services import navigation
+        log.info("LUMEN_NAV_PRELOAD set - warming navigation models + TTS cache...")
+        navigation.preload_in_background()
 
 # CORS: the frontend is served from a different port (typically 8080) during
 # local dev, so we allow cross-origin requests. WebSocket connections aren't

@@ -57,8 +57,24 @@ source .venv/Scripts/activate          # Git Bash on Windows
 source .venv/bin/activate              # macOS / Linux
 .\.venv\Scripts\Activate.ps1           # Windows PowerShell
 
+# GPU box? Install the CUDA build of PyTorch FIRST - on Windows/Linux, plain
+# `pip install torch` gives the CPU-only wheel, and the whole navigation stack
+# (YOLOv8m + door models + SegFormer) would silently run on CPU. Pick the
+# right command for your CUDA version at https://pytorch.org/get-started/
+# e.g.:  pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
+
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+For demos, set `LUMEN_NAV_PRELOAD=1` before starting uvicorn: the navigation
+models load (and, first time, download) in the background at startup, and the
+fixed guidance phrases are pre-synthesized into the TTS cache - so the first
+"navigate to the kitchen" answers immediately instead of sitting in silence.
+
+```bash
+LUMEN_NAV_PRELOAD=1 uvicorn main:app --host 127.0.0.1 --port 8000   # Git Bash / macOS / Linux
+$env:LUMEN_NAV_PRELOAD="1"; uvicorn main:app --host 127.0.0.1 --port 8000   # PowerShell
 ```
 
 First request triggers a few one-time downloads:

@@ -71,6 +71,14 @@ _DT_MAX = 2.0 * _LOOP_INTERVAL
 AMBIENT_MIN_GAP_SEC = 2.5        # no ambient line within this of ANY queued line
 AMBIENT_REPEAT_SEC = 8.0         # identical ambient line at most this often
 
+# Frozen-feed guard: if the phone stops sending frames (screen lock, backgrounded
+# tab, dropped wifi), latest_frame goes stale. Re-analysing the same image would
+# read motion~0 and keep ACCUMULATING indicator evidence from a frozen picture -
+# a stale fridge frame could confirm an arrival while the user stands in a
+# hallway. A frame older than this, or one we already processed, is skipped and
+# the controller's timers stay frozen (no frames = no evidence, either way).
+FRAME_STALE_SEC = 2.0
+
 
 async def _speak_now(session: "Session", text: str) -> None:
     """Direct, awaited speech - only for lines OUTSIDE the perception loop
@@ -231,6 +239,7 @@ async def run(session: "Session", destination: str) -> None:
     speech = _Speech(session)
     journey_start = time.monotonic()
     last_tick = journey_start
+    processed_frame_at: Optional[float] = None   # wall-clock stamp of last frame used
 
     try:
         while True:
@@ -252,9 +261,14 @@ async def run(session: "Session", destination: str) -> None:
                 return
 
             frame = session.latest_frame
-            if frame is None or not getattr(frame, "size", 0):
+            frame_at = session.latest_frame_at   # time.time(), set by frame_handler
+            if (frame is None or not getattr(frame, "size", 0)
+                    or frame_at is None
+                    or frame_at == processed_frame_at          # no NEW frame yet
+                    or (time.time() - frame_at) > FRAME_STALE_SEC):  # feed frozen
                 await asyncio.sleep(_LOOP_INTERVAL)
                 continue
+            processed_frame_at = frame_at
 
             heading = session.heading
 

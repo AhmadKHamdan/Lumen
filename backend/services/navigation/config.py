@@ -38,7 +38,7 @@ DOOR_EDGE_MIN = 0.030  # fraction of Canny-edge pixels inside the box (tunable)
 # treat a "door" as a whole-wall latch and drop it. Skipped once we're committed to
 # approaching a door (go_door/face_target), where the box legitimately grows as we near it.
 DOOR_MAX_FRAME_FRAC = 0.80
-DOOR_DEBUG = True  # print each door candidate's conf/edge/fill + keep/reject to the terminal
+DOOR_DEBUG = False  # log each door candidate's conf/edge/fill + keep/reject (lumen.nav.* at DEBUG)
 # Second-opinion verification (4-class DoorDetect model: door/handle/cabinet/fridge door).
 # Geometry can't separate a lace curtain from a door (curtains are edge-rich, tall,
 # door-sized), so weak candidates must be corroborated SEMANTICALLY: either the
