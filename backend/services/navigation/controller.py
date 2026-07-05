@@ -250,7 +250,7 @@ def accumulate_indicator_evidence(st, seen: set, indicators: set) -> set:
 
 
 def detect_transit(st, near_box: bool, door_confirmed: bool, cur_frac: float,
-                   motion: float) -> tuple:
+                   motion: float, dt: float) -> tuple:
     """Decide whether the user just walked through a doorway (only meaningful in
     go_door). Mutates the near-latch state and, on a confirmed transit, resets to a
     fresh discover scan. Returns (transit, just_near).
@@ -310,8 +310,8 @@ def detect_transit(st, near_box: bool, door_confirmed: bool, cur_frac: float,
         # New rooms also throw saturated door candidates, which would hold this latch
         # forever AFTER the user walked through. Only a properly confirmed door resets
         # the hold timer; saturated-box frames age it until we infer the transit.
-        st["near_age"] = 0 if door_confirmed else st["near_age"] + 1
-        if st["near_age"] >= NEAR_HOLD_MAX:
+        st["near_age"] = 0 if door_confirmed else st["near_age"] + dt
+        if st["near_age"] >= NEAR_HOLD_MAX_SEC:
             _fire_or_wait()
     elif near_now:
         st["near_streak"] += 1  # building the streak; not armed yet
@@ -321,9 +321,9 @@ def detect_transit(st, near_box: bool, door_confirmed: bool, cur_frac: float,
         # door (small fill) — which, mid-walk-through, is the NEXT room's door, not
         # the one we were touching. Both count toward "we've gone through"; letting
         # far glimpses reset this counter once stalled the announcement for ~16 s.
-        st["gone"] += 1
-        st["near_age"] += 1
-        if st["gone"] >= TRANSIT_GONE or st["near_age"] >= NEAR_HOLD_MAX:
+        st["gone"] += dt
+        st["near_age"] += dt
+        if st["gone"] >= TRANSIT_GONE_SEC or st["near_age"] >= NEAR_HOLD_MAX_SEC:
             _fire_or_wait()
     elif door_confirmed:
         st["gone"] = 0  # door in view but not close, latch not armed — not a transit
@@ -336,7 +336,7 @@ def detect_transit(st, near_box: bool, door_confirmed: bool, cur_frac: float,
 
 def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confirmed,
          door_cx_frac, door_corro, region, door_dist, transit, just_near, confirmed,
-         obst_guidance, obst_priority, obst_blocking) -> tuple:
+         obst_guidance, obst_priority, obst_blocking, dt: float) -> tuple:
     """Run the state machine for one frame. Returns
     (guidance, priority, announce_arrival, phrase, matched)."""
     result = evaluate_arrival(goal, confirmed)
@@ -356,10 +356,20 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
             st["last_heading"] = heading
         st["skip_scan_prompt"] = True  # instruction is in THIS line; don't repeat it
         # The at-the-door line already told them to walk through and take steps in —
-        # here we only kick off the new room's scan.
-        guidance = ("You're through. Now slowly turn to your right, all the way "
-                    "around, until you are facing where you started, so I can scan "
-                    "this room.")
+        # here we only kick off the new room's scan. Past the ROOM_CAP, the same
+        # utterance also checks in with the user (design §4.5/§9.5): "stop" is
+        # already a global voice command, so informing IS handing them control —
+        # one merged line, because two priority lines would cut each other off.
+        st["rooms_visited"] += 1
+        over = st["rooms_visited"] - ROOM_CAP
+        scan_cmd = ("Now slowly turn to your right, all the way around, until "
+                    "you are facing where you started, so I can scan this room.")
+        if over >= 0 and over % ROOM_CAP_REMIND == 0:
+            guidance = (f"You're through — that's {st['rooms_visited']} rooms now "
+                        f"and no {goal} yet. Say stop anytime if you'd like to "
+                        "give up, or keep going. " + scan_cmd)
+        else:
+            guidance = "You're through. " + scan_cmd
         priority = True
 
     elif st["mode"] == "discover":
@@ -374,13 +384,13 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
                                 "pan all the way around, pausing a moment as you go.")
                     priority = True
             elif motion <= STILL_MAX:
-                st["scan_age"] += 1
+                st["scan_age"] += dt
                 objs = st["sector_objs"].setdefault(0, Counter())
                 objs.update(seen & indicators)
                 if door_confirmed:
                     objs["door"] += 1
                     st["door_seen"] = True
-                if st["scan_age"] >= FALLBACK_FRAMES:
+                if st["scan_age"] >= FALLBACK_SCAN_SEC:
                     guidance, priority = _finish_discover(st, goal, indicator_ok)
         elif st["ref_heading"] is None:
             # First sensor reading -> set the START direction (our anchor) and begin.
@@ -440,8 +450,8 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
                 if abs(_turn_to(st["ref_heading"], heading)) <= START_TOL:
                     guidance, priority = _finish_discover(st, goal, indicator_ok, confirm_start=True)
                 else:
-                    st["phase_age"] += 1
-                    if "back" not in ms or st["phase_age"] >= REPROMPT:
+                    st["phase_age"] += dt
+                    if "back" not in ms or st["phase_age"] >= REPROMPT_SEC:
                         ms.add("back")
                         st["phase_age"] = 0
                         guidance = "Almost done — keep turning until you face where you started."
@@ -452,17 +462,17 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
             # Settle window: the first object crossed the bar, but its neighbours
             # (the fridge right next to the oven) may be a few frames behind — wait
             # briefly so the arrival line names ALL of them.
-            st["confirm_settle"] += 1
-            if st["confirm_settle"] >= CONFIRM_SETTLE:
+            st["confirm_settle"] += dt
+            if st["confirm_settle"] >= CONFIRM_SETTLE_SEC:
                 st["mode"] = "arrived"
                 announce_arrival = True
         else:
-            st["scan_age"] += 1
-            if st["phase_age"] >= REPROMPT:
+            st["scan_age"] += dt
+            if st["phase_age"] >= REPROMPT_SEC:
                 guidance = f"Keep the camera there, panning slowly, while I confirm the {goal}."  # ambient
                 st["phase_age"] = 0
-            st["phase_age"] += 1
-            if st["scan_age"] >= ROOM_SCAN_CYCLES:
+            st["phase_age"] += dt
+            if st["scan_age"] >= ROOM_SCAN_SEC:
                 # Couldn't re-confirm -> false alarm. The indicator had its chance;
                 # if the scan also flagged a door, take it (door bearings survive the
                 # confirm phase) — otherwise a full rescan.
@@ -514,8 +524,8 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
                 # slowly to your right") reads as two instructions. Stay silent and
                 # let them turn; nudge only if they still haven't faced it after a
                 # while (stuck or turning the wrong way), then sparingly.
-                st["phase_age"] += 1
-                if st["phase_age"] >= REPROMPT:
+                st["phase_age"] += dt
+                if st["phase_age"] >= REPROMPT_SEC:
                     st["phase_age"] = 0
                     side = "right" if turn > 0 else "left"
                     guidance = f"Turn slowly to your {side} to face the {label}."  # ambient
@@ -525,7 +535,9 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
 
     else:  # go_door — Pass 2b: door-only concern.
         if st["obst_hold"] > 0:
-            st["obst_hold"] -= 1  # the call-out is still playing; verdict follows
+            # Countdown by dt, clamped: a float countdown never lands exactly on
+            # zero, and the verdict below keys off "the hold has expired".
+            st["obst_hold"] = max(0.0, st["obst_hold"] - dt)
         if obst_blocking or obst_guidance:
             # Safety first: an obstacle in the walking lane overrides door guidance
             # (and a "path is clear" line gets spoken before door directions resume).
@@ -562,9 +574,9 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
                 guidance = (_door_locate_phrase(region, door_dist)
                             + " Let me check the path ahead.")
                 priority = True  # one-shot: must actually be spoken, never swallowed
-                st["obst_hold"] = OBST_HOLDOFF
+                st["obst_hold"] = OBST_HOLDOFF_SEC
                 st["path_checked"] = False
-            elif not st["path_checked"] and st["obst_hold"] == 0:
+            elif not st["path_checked"] and st["obst_hold"] <= 0:
                 # Hold expired with no obstacle warning -> the clear verdict + how to walk.
                 st["path_checked"] = True
                 guidance = "The path is clear. " + _door_go_phrase(door_dist)
@@ -572,8 +584,8 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
         else:
             # Confirmation scan failing: like branch (a), a flag that can't be
             # re-confirmed within a window means a full rescan, not endless nudging.
-            st["scan_age"] += 1
-            if st["scan_age"] >= DOOR_LOST_CYCLES:
+            st["scan_age"] += dt
+            if st["scan_age"] >= DOOR_LOST_SEC:
                 st.enter_discover()
                 st["skip_scan_prompt"] = True
                 guidance = ("I can't find that door anymore. Let's scan the room again — "
@@ -584,8 +596,8 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
                 if st["phase_age"] == 0:
                     st["phase"] += 1
                     guidance = _find_door_phrases()[st["phase"] % 3]  # ambient
-                st["phase_age"] += 1
-                if st["phase_age"] >= REPROMPT:
+                st["phase_age"] += dt
+                if st["phase_age"] >= REPROMPT_SEC:
                     st["phase_age"] = 0
 
     phrase = ""

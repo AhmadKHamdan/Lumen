@@ -29,9 +29,11 @@ Walking through a near door resets us to discover for the new room.
 Key fields (see the prototype's docs for the full story):
   mode       : current phase
   scan_age   : usable (non-blurred) frames spent in the current scan
-  phase_age  : paces spoken re-prompts (detection runs ~3x/s)
+  phase_age  : paces spoken re-prompts (seconds of observed-frame time)
   near_latch : we got right up to a door (it filled the view)
-  gone       : cycles with no door since near_latch -> infer we walked through
+  gone       : seconds (of frames) with no door since near_latch -> walked through
+  rooms_visited: doorway transits this JOURNEY (never reset per room) - drives the
+                 ROOM_CAP check-in so exploration can't loop silently forever
   door_seen  : a door was confirmed at some point during the current discover
   ref_heading: compass heading (deg) the user faced when this scan began = "ahead"
   last_heading / net_rotation: track cumulative turn to know when 360 is done
@@ -53,7 +55,7 @@ from .config import WINDOW
 
 
 def _initial_fields() -> dict[str, Any]:
-    return {"goal": None, "mode": "discover", "scan_age": 0,
+    return {"goal": None, "rooms_visited": 0, "mode": "discover", "scan_age": 0,
             "phase": 0, "phase_age": 0, "near_latch": False, "gone": 0,
             "door_seen": False,
             "ref_heading": None, "last_heading": None, "net_rotation": 0.0,
@@ -116,7 +118,7 @@ class NavState:
         """Pass 2a: re-confirm the goal's indicators with a fresh scan, then arrive."""
         self._d["mode"] = "go_indicator"
         self._reset_scan_fields()
-        self._d["confirm_settle"] = 0  # settle window before announcing (CONFIRM_SETTLE)
+        self._d["confirm_settle"] = 0  # settle window before announcing (CONFIRM_SETTLE_SEC)
         self.scan_counts.clear()  # fresh evidence so the confirm scan is a real re-check
         self.door_hist.clear()
 
@@ -130,7 +132,7 @@ class NavState:
         d = self._d
         d["mode"] = "go_door"
         self._reset_scan_fields()
-        d["phase_age"] = 1  # delay the first "no door yet" so it doesn't double up
+        d["phase_age"] = 0.5  # (seconds) delay the first "no door yet" so it doesn't double up
         d["last_door_dist"] = None  # fresh approach: no stale "we were close" memory
         d["approach_frac"] = 0.0
         d["near_age"] = 0

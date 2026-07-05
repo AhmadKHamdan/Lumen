@@ -21,7 +21,7 @@ from .config import (CORRIDOR_X, DEPTH_AREA_FRAC, DEPTH_FAR_ROWS, DEPTH_FLAT_MIN
                      DEPTH_INPUT_W, DEPTH_LANE_ROWS, DEPTH_LANE_X, DEPTH_NEAR_ROWS,
                      DEPTH_REL_MARGIN, DOOR_DEBUG, FLOOR_LANE_ROWS, FLOOR_LANE_X,
                      FLOOR_MIN_COVER, OBST_BOTTOM_FRAC, OBST_CLEAR_HITS, OBST_HITS,
-                     OBST_MIN_H_FRAC, OBST_MIN_OVERLAP, OBST_NAMES, OBST_REPROMPT,
+                     OBST_MIN_H_FRAC, OBST_MIN_OVERLAP, OBST_NAMES, OBST_REPROMPT_SEC,
                      OBST_SIGNAL)
 from . import models
 
@@ -124,12 +124,12 @@ def _obstacle_in_corridor(obstacle_dets, w: int, h: int):
     return None if best is None else (best[1], best[2])
 
 
-def _obstacle_watchdog(st, obstacle_dets, unnamed_side, w: int, h: int):
+def _obstacle_watchdog(st, obstacle_dets, unnamed_side, w: int, h: int, dt: float):
     """Debounced corridor watchdog fusing two layers: the YOLO class layer (names the
     object) and the class-agnostic unnamed signal (floor or depth — precomputed by
     the caller as a step-aside side, or None). Returns (guidance, priority, blocking).
     blocking=True means a confirmed obstacle is in the lane now, so the caller
-    suppresses door guidance. Speaks on first confirm, again every OBST_REPROMPT
+    suppresses door guidance. Speaks on first confirm, again every OBST_REPROMPT_SEC
     frames while still blocked, and once when the path clears."""
     yolo = _obstacle_in_corridor(obstacle_dets, w, h)   # (cls, cx) or None
     if yolo is not None:
@@ -154,12 +154,12 @@ def _obstacle_watchdog(st, obstacle_dets, unnamed_side, w: int, h: int):
             print(f"[obst] {what} -> blocking, step {side}", flush=True)
         if not st["obst_active"]:
             st["obst_active"] = True
-            st["obst_cool"] = OBST_REPROMPT
+            st["obst_cool"] = OBST_REPROMPT_SEC
             return f"There's {what} in your path. Step to your {side}, where it's clear.", True, True
         if st["obst_cool"] <= 0:
-            st["obst_cool"] = OBST_REPROMPT
+            st["obst_cool"] = OBST_REPROMPT_SEC
             return f"It's still in your path — step more to your {side}.", True, True
-        st["obst_cool"] -= 1
+        st["obst_cool"] -= dt
         return "", False, True  # blocking, mid-cooldown -> stay silent this frame
     # corridor clear this frame
     st["obst_hits"] = 0
@@ -173,7 +173,7 @@ def _obstacle_watchdog(st, obstacle_dets, unnamed_side, w: int, h: int):
     return "", False, False
 
 
-def evaluate(st, obstacle_dets, img, w: int, h: int):
+def evaluate(st, obstacle_dets, img, w: int, h: int, dt: float):
     """Run the watchdog while WALKING in go_door. Off-walk (scanning/turning phases),
     reset the debounce so the next approach starts clean.
     Returns (guidance, priority, blocking)."""
@@ -187,11 +187,11 @@ def evaluate(st, obstacle_dets, img, w: int, h: int):
                 unnamed_side = _depth_tripwire(_depth_map(img))
             else:
                 unnamed_side = None
-            return _obstacle_watchdog(st, obstacle_dets, unnamed_side, w, h)
+            return _obstacle_watchdog(st, obstacle_dets, unnamed_side, w, h, dt)
         # AT/THROUGH the door: the panel fills the frame, so the floor/depth signal
         # is meaningless here and pauses — but a PERSON stepping into the doorway is
         # still a named YOLO box. The named layer stays armed through the transit.
-        return _obstacle_watchdog(st, obstacle_dets, None, w, h)
+        return _obstacle_watchdog(st, obstacle_dets, None, w, h, dt)
     st["obst_hits"] = 0
     st["obst_clear"] = 0
     st["obst_active"] = False

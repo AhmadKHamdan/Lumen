@@ -66,15 +66,22 @@ DIST_CAL = 1.0
 HAND_REACH_STEPS = 3  # within this many steps, ask the user to reach out and feel for the door
 
 # --- Pacing ----------------------------------------------------------------------
-REPROMPT = 12          # cycles between spoken re-prompts (~4 s)
-ROOM_SCAN_CYCLES = 30  # frames for the go_indicator re-confirm before giving up
+# Pacing/timeout constants are SECONDS of observed-frame time. The engine passes a
+# clamped per-tick dt into the controller, so the timers mean the same thing at any
+# loop rate, and a stall (TTS synthesis, slow inference) can neither rush a timeout
+# nor fake an absence ("door gone for 2 s" needs 2 s of FRAMES without the door,
+# not 2 s of wall clock while nothing was observed). Evidence thresholds
+# (OBST_HITS, NEAR_STREAK, WALK_FRAMES_MIN, the 2-of-3 door rule, sighting minima)
+# stay as consecutive-OBSERVATION counts - those are samples, not durations.
+REPROMPT_SEC = 4.0     # seconds between spoken re-prompts
+ROOM_SCAN_SEC = 10.0   # seconds for the go_indicator re-confirm before giving up
 # The directed confirmation is a RE-check of evidence the 360 scan already flagged —
 # it doesn't need the scan's own strictness. Fewer hits + a short settle keep the
 # arrival snappy (~2 s of steady pointing) while still naming ALL the adjacent
 # indicators (the fridge right next to the oven), not just whichever confirmed first.
 CONFIRM_HITS = 3       # detection frames per class during go_indicator (scan keeps 4)
-CONFIRM_SETTLE = 3     # ~1 s extra so neighbours cross the bar too
-DOOR_LOST_CYCLES = 36  # go_door frames with no door re-confirmed -> full rescan (~12 s)
+CONFIRM_SETTLE_SEC = 1.0  # extra settle so neighbours cross the bar too
+DOOR_LOST_SEC = 12.0   # go_door seconds with no door re-confirmed -> full rescan
 
 # --- Compass-driven 360 scan -----------------------------------------------------
 # The user does ONE slow guided turn. The phone compass tracks rotation so we know
@@ -85,7 +92,7 @@ BUCKET_DEG = 360.0 / BUCKETS
 FULL_TURN_DEG = 350.0             # rotated this far = back to the start direction (full circle)
 START_TOL = 25.0                  # within this many deg of the start heading = "back at start"
 STILL_MAX = 12.0                  # (fallback path only) motion below = phone steady
-FALLBACK_FRAMES = 40              # (no-compass path) usable frames before finishing
+FALLBACK_SCAN_SEC = 13.0          # (no-compass path) seconds of steady capture before finishing
 FACE_TOL = 25.0                   # within this many deg of the door's heading = "facing it"
 DOOR_CLUSTER_DEG = 30.0           # door sightings within this many deg = the SAME door
 # Reliability gates for what the scan REPORTS and ACTS ON. Detection isn't as good
@@ -102,7 +109,7 @@ DOOR_FILL_FRAC = 0.85  # door height (fraction of frame) meaning "you're at the 
 # steps in) — announcing "you're through" too early talks over the user mid-action,
 # but waiting too long feels broken. ~2 s with our door out of view lands right after
 # the steps in (far doors glimpsed in the NEW room don't reset this — see transit).
-TRANSIT_GONE = 6       # cycles with our door gone after being at it -> walked through
+TRANSIT_GONE_SEC = 2.0  # seconds with our door gone after being at it -> walked through
 # At arm's length a door is a flat panel: the detector still boxes it (huge box) but
 # the edge gate rejects it (smooth interior). If we TRACKED an approach down to this
 # distance, a saturated door box means "at the door" — walls can't fake that, because
@@ -125,9 +132,18 @@ NEAR_STREAK = 2
 # New rooms throw full-frame door candidates too, which would hold the at-the-door
 # latch forever (the user already walked through!). Cap how long the latch can hold
 # without a properly confirmed door before we infer the transit happened. Sized well
-# above TRANSIT_GONE so the failsafe never fires while the user is still standing at
+# above TRANSIT_GONE_SEC so the failsafe never fires while the user is still standing at
 # the door listening to the (long) walk-through instruction.
-NEAR_HOLD_MAX = 40     # ~13 s at ~3 fps
+NEAR_HOLD_MAX_SEC = 13.0
+
+# --- Journey limits (design doc §4.5 / §9.5) --------------------------------------
+# Without SLAM the explorer has no map, so a wrong wing of a building could keep it
+# walking forever. rooms_visited counts doorway transits per JOURNEY (not per room);
+# at the cap Lumen checks in with the user instead of looping silently - "stop"
+# (already a global voice command) is the escape hatch, continuing is the default.
+ROOM_CAP = 4             # rooms searched before checking in with the user
+ROOM_CAP_REMIND = 2      # ...then remind every this many further rooms
+NAV_TIMEOUT_SEC = 300.0  # whole-journey hard stop (engine enforces, speaks first)
 
 # --- Obstacle watchdog (Phase A: YOLO classes; the depth tripwire is Phase B) ----
 # While the user WALKS to a door (go_door), warn about known objects standing in the
@@ -143,12 +159,12 @@ OBST_MIN_OVERLAP = 0.10    # min lane overlap (fraction of width) to count as "i
                            # (0.04 let side furniture grazing the lane edge trigger stops)
 OBST_HITS = 3              # consecutive frames before the FIRST alert (kills flicker)
 OBST_CLEAR_HITS = 2        # consecutive clear frames before declaring the path clear
-OBST_REPROMPT = 9          # frames between repeated warnings while still blocked (~3 s)
+OBST_REPROMPT_SEC = 3.0    # seconds between repeated warnings while still blocked
 # After the door call-out ("...let me check the path ahead"), obstacle speech is held
 # this many frames so the call-out finishes playing, then the path verdict follows —
 # either "the path is clear, walk..." or the obstacle warning. Detection still runs
 # during the hold; only the SPEECH waits.
-OBST_HOLDOFF = 5           # ~2 s
+OBST_HOLDOFF_SEC = 2.0
 
 # --- Unnamed-obstacle signal (OBST-3). The question was never "is there an object?"
 # but "is the strip of floor I'm about to walk on clear?" — so the primary signal is
