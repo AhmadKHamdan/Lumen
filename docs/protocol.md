@@ -54,6 +54,31 @@ then transcribes via Whisper.
 
 Wire format: `[0x02][...WebM/Opus bytes...]`
 
+### `motion` (JSON)
+Coarse device-motion state from the phone's accelerometer, sent on state
+*change* only (not per sample).
+
+```json
+{ "type": "motion", "state": "still" }
+```
+
+- `state`: one of `"still" | "moving" | "walking"`. The server uses it to relax
+  guidance debouncing while the user is actually moving. Optional - sessions
+  without motion data behave like `"still"`.
+
+### `heading` (JSON)
+Phone compass heading from `DeviceOrientationEvent`, sent while a session is
+active, throttled (≥2° change, ≤5 Hz).
+
+```json
+{ "type": "heading", "degrees": 137.5 }
+```
+
+- `degrees`: `0.0 ≤ degrees < 360.0`, clockwise from north. Drives the
+  navigation task's guided 360° room scan and door/indicator bearing math.
+  Optional - without a compass (laptop, permission denied) navigation falls
+  back to a single-pass scan with no bearing summaries.
+
 ---
 
 ## Server → Client

@@ -115,6 +115,13 @@ class Session:
         # aren't hidden behind the smoothing when the user actually walked).
         self.motion_state: str = "still"
 
+        # Phone compass heading in degrees (0-360, clockwise), reported by the
+        # client's DeviceOrientationEvent. None when the device has no compass
+        # (laptop) or permission was denied. The navigation task uses it to
+        # track the 360 room scan and to anchor door/indicator bearings; every
+        # other task ignores it.
+        self.heading: Optional[float] = None
+
         # FSM owned by this session
         self.fsm: TaskFSM = TaskFSM()
         self.fsm.subscribe(self._on_fsm_change)

@@ -6,6 +6,7 @@ import { MediaController } from "./media.js";
 import { AudioQueue } from "./audio_queue.js";
 import { WakeLockManager } from "./wakelock.js";
 import { MotionMonitor } from "./motion.js";
+import { HeadingMonitor } from "./heading.js";
 
 // ---------- browser TTS fallback ----------
 //
@@ -74,6 +75,12 @@ const motion = new MotionMonitor((state) => {
   // messages, but no point sending noise otherwise.
   if (!active) return;
   ws.sendJson({ type: "motion", state });
+});
+const heading = new HeadingMonitor((degrees) => {
+  // Compass heading for the navigation task's 360 room scan. Same rule:
+  // only send while a session is active.
+  if (!active) return;
+  ws.sendJson({ type: "heading", degrees });
 });
 
 let active = false;  // true between Start and Stop
@@ -212,6 +219,9 @@ btnStart.addEventListener("click", async () => {
   // requires that for permission. Fire-and-forget; failure just means the
   // server won't see motion updates and falls back to plain debouncing.
   motion.start().catch((e) => console.warn("motion.start failed", e));
+  // Compass heading, same gesture requirement on iOS. Failure is fine - the
+  // navigation scan falls back to a compass-less single pass.
+  heading.start().catch((e) => console.warn("heading.start failed", e));
   ws.connect();
 
   // Wait briefly for the WebSocket to open before sending start.
@@ -237,6 +247,7 @@ btnStop.addEventListener("click", async () => {
   await media.stop();
   await wakeLock.release();
   motion.stop();
+  heading.stop();
   ws.close();
 
   btnStart.disabled = false;

@@ -2,12 +2,11 @@
 how to merge repeated sightings of one object, and how far to turn to face a heading.
 
 All directions are anchored to the START heading of the current scan (the fixed
-reference), which lives in `_state["ref_heading"]`. These helpers are otherwise pure.
+reference), which lives in `st["ref_heading"]`. These helpers are otherwise pure.
 """
 from __future__ import annotations
 
 from .config import BUCKET_DEG, DOOR_CLUSTER_DEG
-from .state import _state
 
 
 def _signed_from_ref(bucket: int) -> float:
@@ -17,14 +16,14 @@ def _signed_from_ref(bucket: int) -> float:
     return ((deg + 180.0) % 360.0) - 180.0  # wrap to (-180, 180]
 
 
-def _signed_from_ref_deg(abs_heading: float) -> float:
+def _signed_from_ref_deg(st, abs_heading: float) -> float:
     """Signed degrees of an absolute compass heading from the START direction
     (+ right, - left), wrapped to (-180, 180]."""
-    ref = _state["ref_heading"] or 0.0
+    ref = st["ref_heading"] or 0.0
     return ((abs_heading - ref + 180.0) % 360.0) - 180.0
 
 
-def _cluster_bearings(bearings: list[float]) -> list[tuple[float, int]]:
+def _cluster_bearings(st, bearings: list[float]) -> list[tuple[float, int]]:
     """Collapse accumulated sighting bearings into distinct physical objects.
 
     Sightings of one object land within a few degrees of each other; sightings of two
@@ -33,7 +32,7 @@ def _cluster_bearings(bearings: list[float]) -> list[tuple[float, int]]:
     so the summary names each object once and we get a precise heading to face."""
     if not bearings:
         return []
-    signed = sorted(_signed_from_ref_deg(b) for b in bearings)
+    signed = sorted(_signed_from_ref_deg(st, b) for b in bearings)
     groups: list[list[float]] = [[signed[0]]]
     for s in signed[1:]:
         if s - groups[-1][-1] <= DOOR_CLUSTER_DEG:
@@ -52,8 +51,8 @@ def _cluster_bearings(bearings: list[float]) -> list[tuple[float, int]]:
     return out
 
 
-def _cluster_doors() -> list[tuple[float, int]]:
-    return _cluster_bearings(_state["door_bearings"])
+def _cluster_doors(st) -> list[tuple[float, int]]:
+    return _cluster_bearings(st, st["door_bearings"])
 
 
 def _turn_to(target_heading: float, current_heading: float) -> float:
@@ -63,16 +62,16 @@ def _turn_to(target_heading: float, current_heading: float) -> float:
     return ((target_heading - current_heading + 180.0) % 360.0) - 180.0
 
 
-def _track_turn(heading: float | None) -> None:
+def _track_turn(st, heading: float | None) -> None:
     """Advance the discover-scan rotation total. Runs on EVERY frame (even blurred
     ones the detector skips) so a fast segment never stalls the full-circle check.
     Ignores large compass glitches."""
-    if heading is None or _state["last_heading"] is None:
+    if heading is None or st["last_heading"] is None:
         return
-    d = ((heading - _state["last_heading"] + 180.0) % 360.0) - 180.0
-    _state["last_heading"] = heading
+    d = ((heading - st["last_heading"] + 180.0) % 360.0) - 180.0
+    st["last_heading"] = heading
     if abs(d) <= 120.0:
-        _state["net_rotation"] += d
+        st["net_rotation"] += d
 
 
 def _direction(signed_deg: float) -> str:

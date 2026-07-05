@@ -21,7 +21,7 @@ No special hardware. No app install. Just a phone browser, a WebSocket, and a Py
 ## Highlights
 
 - **Voice in, voice out.** Push-to-talk recording, server-side faster-whisper for STT, gTTS for synthesis. No screen interaction required.
-- **Three task families.** Find objects in a room, navigate toward a landmark, and reach for an object that's within arm's reach.
+- **Three task families.** Find objects in a room, navigate to another room by exploring door-by-door, and reach for an object that's within arm's reach.
 - **YOLOv8n + MediaPipe Hands.** Object detection and 21-landmark hand pose, both running on CPU, ~5 FPS end-to-end.
 - **Per-class distance estimation.** "A laptop occupying 40% of frame width is near; the same image of a cup at 18% is also near" - same camera, correct guidance for each.
 - **Auto-grasp completion.** When the user's fingertip enters the target's bounding box, the task ends automatically and announces success.
@@ -61,11 +61,14 @@ pip install -r requirements.txt
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-First request triggers two one-time downloads:
+First request triggers a few one-time downloads:
 
 - Whisper `base` weights (~150 MB, from HuggingFace, cached in `~/.cache/huggingface/`).
 - YOLOv8n weights (`yolov8n.pt`, ~6 MB, from the ultralytics CDN).
 - MediaPipe Hands models ship inside the pip wheel - no download.
+- First *navigation* task additionally pulls YOLOv8m (~50 MB, ultralytics CDN) and
+  SegFormer-B0 (~15 MB, HuggingFace). The custom door detector + verifier weights
+  are committed in the repo (`best.pt`, `door_training/runs/...`) - no download.
 
 ### Use it
 
@@ -107,10 +110,12 @@ Object Allocation supports a curated set of COCO classes (cup, bottle, chair, co
 |  - MediaRecorder    |   JSON +       |  Router -> Session -> FSM         |
 |  - <audio> element  |   binary tags  |                                   |
 |  - Push-to-talk UI  |                |  Services:                        |
-+---------------------+                |    faster-whisper  (STT)          |
-                                       |    YOLOv8n         (detection)    |
+|  - compass heading  |                |    faster-whisper  (STT)          |
++---------------------+                |    YOLOv8n         (detection)    |
                                        |    MediaPipe Hands (hand pose)    |
                                        |    spatial_reasoning + guidance   |
+                                       |    navigation (door model +       |
+                                       |      exploration + obstacles)     |
                                        |    gTTS            (synthesis)    |
                                        +-----------------------------------+
 ```
@@ -173,9 +178,17 @@ When Object Allocation has the target at `near` distance AND MediaPipe detects a
 
 MediaPipe is only invoked when the tracker says we're in (or just left) reach distance - it stays idle the rest of the time, saving CPU.
 
-### Navigation - guide to a landmark
+### Navigation - goal-directed exploration
 
-Sister task to Object Allocation, currently being developed by another team member. Uses YOLOv8n's furniture classes as proxy landmarks, with the same FSM scaffolding (`NavigationActive` state, the same cancel / completion verbs).
+The user names only a destination ("navigate to the kitchen") and Lumen guides them there room-by-room, asking the user for direction only when perception is genuinely ambiguous. Per room:
+
+1. **Scan** - a compass-tracked guided 360° turn. Detections are bucketed into 30° sectors; door and indicator sightings are recorded with true bearings (camera heading + position in frame).
+2. **Arrive?** - rooms are recognised by their objects: ≥1 primary indicator (fridge/oven ⇒ kitchen, toilet ⇒ bathroom, bed ⇒ bedroom, ...) or ≥2 secondary ones, temporally accumulated so a single flicker never declares arrival. A directed re-confirmation ("turn that way, let's make sure") always precedes the announcement.
+3. **Choose a door** - doors come from a three-layer funnel: a custom-trained single-class door detector (mAP50 ~0.95), geometric gates (aspect ratio, edge density against blank walls, frame-fill), and a 4-class DoorDetect verifier as a semantic second opinion (kills curtains and door↔fridge confusions).
+4. **Go** - the spoken call-out gives bearing + step count (pinhole distance from the door's pixel height), then a path check. While walking, an **obstacle watchdog** fuses YOLO named objects in the walking lane with SegFormer floor segmentation (class-agnostic - catches clutter COCO has no word for) and preempts door guidance.
+5. **Cross** - doorway transit is detected from the door box saturating the frame, then disappearing, *plus* sustained camera motion (the camera is the odometer - detection flicker can never fake "you're through"). Then the next room's scan starts automatically.
+
+Runs as a per-session async loop (same pattern as Object Allocation) at ~3 Hz; a motion gate skips blurred frames while the phone pans and coaches the user to slow down. Without a compass (laptop, permission denied) the scan falls back to a single steady pass. See [`docs/Exploration_Navigation_Design.md`](docs/Exploration_Navigation_Design.md) for the design rationale and [`docs/Door_Model_Training_Results.md`](docs/Door_Model_Training_Results.md) for the door-model training.
 
 ---
 
@@ -203,8 +216,17 @@ Lumen/
 │   │   ├── guidance_generator.py  # Object Allocation phrase templates
 │   │   ├── reach_guidance.py      # fingertip-vs-target spatial logic + phrases
 │   │   ├── object_allocation.py   # GuidanceTracker + 5 Hz async loop
-│   │   └── navigation.py          # landmark waypoints (in development)
-│   ├── tests/                     # 200+ pytest cases
+│   │   └── navigation/            # goal-directed exploration (Sprint 4)
+│   │       ├── engine.py          # per-session ~3 Hz async loop
+│   │       ├── controller.py      # discover/face/confirm/go_door state machine
+│   │       ├── perception.py      # 3-layer door funnel + COCO indicators
+│   │       ├── obstacles.py       # walking-lane watchdog (YOLO + floor seg)
+│   │       ├── geometry.py        # compass/bearing math
+│   │       ├── goals.py           # room -> indicator tables, goal resolution
+│   │       ├── models.py          # lazy YOLOv8m + door models + SegFormer
+│   │       ├── state.py           # per-session NavState
+│   │       └── config.py          # every tuning constant, in one place
+│   ├── tests/                     # 280+ pytest cases
 │   └── captured_audio/            # raw PTT WebM blobs for debugging (gitignored)
 ├── frontend/                      # Vanilla HTML + JS, no build step
 │   ├── index.html
@@ -214,9 +236,14 @@ Lumen/
 │       ├── ws_client.js
 │       ├── media.js               # getUserMedia + MediaRecorder + 5 FPS loop
 │       ├── audio_queue.js         # persistent primed <audio> for iOS
+│       ├── heading.js             # compass heading for the navigation scan
 │       └── wakelock.js
+├── door_training/                 # door-model dataset prep + trained verifier
+├── best.pt                        # custom single-class door detector (committed)
 ├── docs/
 │   ├── protocol.md                # frozen WS contract
+│   ├── Exploration_Navigation_Design.md    # navigation design + rationale
+│   ├── Door_Model_Training_Results.md      # door detector training report
 │   └── ...                        # sprint plan + intro PDFs
 └── README.md
 ```
@@ -232,7 +259,7 @@ cd backend
 python -m pytest tests/ -q
 ```
 
-200+ tests covering: FSM transitions, command parsing (50+ realistic transcriptions including mishearings and synonyms), spatial bucketing (per-class distance), guidance phrase rendering, reach-guidance state machine, hand-pose landmark conversion, YOLO detection parsing, and the Object Allocation `GuidanceTracker` end-to-end with scripted frames and a fake clock.
+280+ tests covering: FSM transitions, command parsing (50+ realistic transcriptions including mishearings and synonyms), spatial bucketing (per-class distance), guidance phrase rendering, reach-guidance state machine, hand-pose landmark conversion, YOLO detection parsing, the Object Allocation `GuidanceTracker` end-to-end with scripted frames and a fake clock, and the navigation exploration controller end-to-end (guided 360 scan → door choice → approach → doorway transit → next room → semantic arrival) plus its compass/bearing math and room-indicator arrival rules.
 
 The tests deliberately avoid loading the actual heavy ML models (YOLO weights, MediaPipe runtime) - they exercise the pure decision logic with mocks, so the suite runs in under a second.
 
@@ -245,6 +272,8 @@ The tests deliberately avoid loading the actual heavy ML models (YOLO weights, M
 | Audio decode | PyAV | Bundles FFmpeg shared libs in the wheel - no system `ffmpeg.exe` on PATH required. |
 | Object detection | YOLOv8n via ultralytics | Smallest of the family (~6 MB), CPU-friendly, COCO-pretrained matches our noun list. |
 | Hand pose | MediaPipe Hands | 21 landmarks, CPU realtime, models bundled in wheel. |
+| Navigation detection | YOLOv8m + custom door YOLOv8s x2 | v8m for room indicators at angle/distance (GPU); a trained single-class door detector + 4-class verifier (weights committed). |
+| Obstacle floor check | SegFormer-B0 (ADE20K) | Labels every pixel; the walking lane must stay mostly floor. Optional - degrades to YOLO-only. |
 | TTS | gTTS | Free; we cache MP3s; latency masked by parallel detection. |
 | Command parsing | rapidfuzz | Tolerant of Whisper mishearings, structural matching of prefix + noun. |
 | Frontend | Vanilla HTML/JS, no build | One less moving part. Frontend served same-origin by the backend. |
@@ -260,7 +289,7 @@ Cloudflare Tunnel quick tunnels are the default recommendation in this README be
 - [x] Sprint 1 - voice round-trip working end-to-end (FSM + WS + STT + TTS).
 - [x] Sprint 2 - phone deployment over HTTPS (Cloudflare Tunnel + iOS audio unlock).
 - [x] Sprint 3 - Object Allocation with YOLOv8n.
-- [ ] Sprint 4 - Navigation with landmark waypoints (in development).
+- [x] Sprint 4 - Navigation via goal-directed exploration (custom door model + room recognition + obstacle watchdog).
 - [x] Sprint 5 - Reach Guidance with MediaPipe Hands.
 - [ ] Sprint 6 - Blindfolded user trials, performance polish, final report.
 
@@ -272,7 +301,7 @@ See [`docs/Lumen_Implementation_Plan.pdf`](docs/Lumen_Implementation_Plan.pdf) f
 
 **Ahmad Hamdan** - 1210241 - Birzeit University, ENCS5200.
 
-Developed as a team graduation project at Birzeit University's Department of Electrical and Computer Engineering. Architecture, vision pipeline, and reach-guidance work by the author; navigation pipeline by a team-mate.
+Developed as a team graduation project at Birzeit University's Department of Electrical and Computer Engineering. Architecture, vision pipeline, and reach-guidance work by the author; the exploration-navigation pipeline (door model training, perception funnel, exploration controller) by team-mates, integrated into the backend architecture jointly.
 
 ## License
 

@@ -23,20 +23,19 @@ from .config import (CORRIDOR_X, DEPTH_AREA_FRAC, DEPTH_FAR_ROWS, DEPTH_FLAT_MIN
                      FLOOR_MIN_COVER, OBST_BOTTOM_FRAC, OBST_CLEAR_HITS, OBST_HITS,
                      OBST_MIN_H_FRAC, OBST_MIN_OVERLAP, OBST_NAMES, OBST_REPROMPT,
                      OBST_SIGNAL)
-from .models import _depth_pipe, _seg_infer, _seg_walkable_ids
-from .state import _state
+from . import models
 
 
 def _depth_map(img):
     """Relative depth map (PIL-normalized 0..255, H'xW') for a frame, or None.
     Downscaled for speed; orientation matches the input."""
-    if _depth_pipe is None:
+    if models._depth_pipe is None:
         return None
     dw = DEPTH_INPUT_W
     dh = max(1, int(round(dw * img.shape[0] / img.shape[1])))
     small = cv2.resize(img, (dw, dh))
     pim = Image.fromarray(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
-    return np.asarray(_depth_pipe(pim)["depth"], dtype=np.float32)
+    return np.asarray(models._depth_pipe(pim)["depth"], dtype=np.float32)
 
 
 def _depth_tripwire(d):
@@ -86,10 +85,10 @@ def _floor_tripwire(img):
     deliberately walking toward. Something BESIDE the path leaves the lane's floor
     continuous; something IN the path punches a hole in it. The sidestep suggestion
     points at whichever flank has more visible floor."""
-    if _seg_infer is None:
+    if models._seg_infer is None:
         return None
-    ids = _seg_infer(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
-    walk = np.isin(ids, _seg_walkable_ids)
+    ids = models._seg_infer(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
+    walk = np.isin(ids, models._seg_walkable_ids)
     H, W = walk.shape
     r0, r1 = int(FLOOR_LANE_ROWS[0] * H), int(FLOOR_LANE_ROWS[1] * H)
     cL, cR = int(FLOOR_LANE_X[0] * W), int(FLOOR_LANE_X[1] * W)
@@ -125,7 +124,7 @@ def _obstacle_in_corridor(obstacle_dets, w: int, h: int):
     return None if best is None else (best[1], best[2])
 
 
-def _obstacle_watchdog(obstacle_dets, unnamed_side, w: int, h: int):
+def _obstacle_watchdog(st, obstacle_dets, unnamed_side, w: int, h: int):
     """Debounced corridor watchdog fusing two layers: the YOLO class layer (names the
     object) and the class-agnostic unnamed signal (floor or depth — precomputed by
     the caller as a step-aside side, or None). Returns (guidance, priority, blocking).
@@ -142,44 +141,44 @@ def _obstacle_watchdog(obstacle_dets, unnamed_side, w: int, h: int):
         what, side = ("something", unnamed_side) if unnamed_side else (None, None)
 
     if what is not None:
-        _state["obst_clear"] = 0
-        _state["obst_hits"] += 1
-        if _state["obst_hits"] < OBST_HITS:
+        st["obst_clear"] = 0
+        st["obst_hits"] += 1
+        if st["obst_hits"] < OBST_HITS:
             return "", False, False  # not confirmed yet -> let door guidance run
-        if _state["obst_hold"] > 0:
+        if st["obst_hold"] > 0:
             # The door call-out ("...let me check the path ahead") is still playing —
             # confirmed, but hold the SPEECH so the sentence finishes; the warning
             # becomes the path verdict right after. Calm tone, never a barked "Stop".
             return "", False, True
         if DOOR_DEBUG:
             print(f"[obst] {what} -> blocking, step {side}", flush=True)
-        if not _state["obst_active"]:
-            _state["obst_active"] = True
-            _state["obst_cool"] = OBST_REPROMPT
+        if not st["obst_active"]:
+            st["obst_active"] = True
+            st["obst_cool"] = OBST_REPROMPT
             return f"There's {what} in your path. Step to your {side}, where it's clear.", True, True
-        if _state["obst_cool"] <= 0:
-            _state["obst_cool"] = OBST_REPROMPT
+        if st["obst_cool"] <= 0:
+            st["obst_cool"] = OBST_REPROMPT
             return f"It's still in your path — step more to your {side}.", True, True
-        _state["obst_cool"] -= 1
+        st["obst_cool"] -= 1
         return "", False, True  # blocking, mid-cooldown -> stay silent this frame
     # corridor clear this frame
-    _state["obst_hits"] = 0
-    if _state["obst_active"]:
-        _state["obst_clear"] += 1
-        if _state["obst_clear"] >= OBST_CLEAR_HITS:
-            _state["obst_active"] = False
-            _state["obst_clear"] = 0
+    st["obst_hits"] = 0
+    if st["obst_active"]:
+        st["obst_clear"] += 1
+        if st["obst_clear"] >= OBST_CLEAR_HITS:
+            st["obst_active"] = False
+            st["obst_clear"] = 0
             return "Okay, the way ahead is clear.", True, False
         return "", False, True  # brief grace before resuming door directions
     return "", False, False
 
 
-def evaluate(obstacle_dets, img, w: int, h: int):
+def evaluate(st, obstacle_dets, img, w: int, h: int):
     """Run the watchdog while WALKING in go_door. Off-walk (scanning/turning phases),
     reset the debounce so the next approach starts clean.
     Returns (guidance, priority, blocking)."""
-    if _state["mode"] == "go_door":
-        if not _state["near_latch"]:
+    if st["mode"] == "go_door":
+        if not st["near_latch"]:
             # Approach: both layers. The class-agnostic unnamed signal per OBST_SIGNAL
             # ("off" or a model that failed to load -> None -> YOLO only).
             if OBST_SIGNAL == "floor":
@@ -188,12 +187,12 @@ def evaluate(obstacle_dets, img, w: int, h: int):
                 unnamed_side = _depth_tripwire(_depth_map(img))
             else:
                 unnamed_side = None
-            return _obstacle_watchdog(obstacle_dets, unnamed_side, w, h)
+            return _obstacle_watchdog(st, obstacle_dets, unnamed_side, w, h)
         # AT/THROUGH the door: the panel fills the frame, so the floor/depth signal
         # is meaningless here and pauses — but a PERSON stepping into the doorway is
         # still a named YOLO box. The named layer stays armed through the transit.
-        return _obstacle_watchdog(obstacle_dets, None, w, h)
-    _state["obst_hits"] = 0
-    _state["obst_clear"] = 0
-    _state["obst_active"] = False
+        return _obstacle_watchdog(st, obstacle_dets, None, w, h)
+    st["obst_hits"] = 0
+    st["obst_clear"] = 0
+    st["obst_active"] = False
     return "", False, False

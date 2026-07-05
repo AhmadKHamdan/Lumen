@@ -43,6 +43,21 @@ av>=13.0.0
 # --- Command parsing -------------------------------------------------------
 rapidfuzz==3.10.1
 
+# --- Navigation (Sprint 4: goal-directed exploration) ----------------------
+# The navigation task loads YOLOv8m (auto-downloaded like yolov8n) plus the
+# custom door detector (best.pt, committed at the repo root) and the 4-class
+# door verifier (door_training/runs/.../best.pt, also committed). ultralytics
+# above covers all three. opencv is pulled in by ultralytics; listed here
+# because the navigation perception stack uses cv2 directly (Canny edge
+# gates, motion gating, resizing).
+opencv-python>=4.8
+# Floor-segmentation obstacle layer (SegFormer-B0). Optional at runtime - if
+# these fail to import, the obstacle watchdog degrades to YOLO named objects
+# only (see services/navigation/models.py) - but installed by default since
+# the demo targets a GPU box.
+torch>=2.0
+transformers>=4.40
+
 # --- Tests -----------------------------------------------------------------
 pytest==8.3.3
 pytest-asyncio==0.24.0

@@ -23,8 +23,7 @@ from .config import (ASSUMED_HFOV_DEG, CONF, DIST_CAL, DOOR_CONF, DOOR_DEBUG,
                      DOOR_EDGE_MIN, DOOR_FILL_FRAC, DOOR_HEIGHT_M, DOOR_MAX_FRAME_FRAC,
                      DOOR_MAX_WH, DOOR_OBJ_IOU, DOOR_STRONG_CONF, MIN_HITS,
                      OBSTACLE_CLASSES, STEP_LENGTH_M, VERIFY_CONF, VERIFY_IOU)
-from .models import _door_model, _model, _name_to_id, _names, _verify_model
-from .state import _door_hist, _state
+from . import models
 
 
 # --- small geometric helpers ----------------------------------------------------
@@ -77,7 +76,7 @@ def _door_distance_m(px_height: float, img_w_px: int, img_h_px: int) -> float | 
 
 # --- stage 1: COCO objects -------------------------------------------------------
 
-def perceive_objects(img, w: int, h: int, indicators: set):
+def perceive_objects(st, img, w: int, h: int, indicators: set):
     """Run the COCO model (indicators, plus obstacle classes while walking) and apply
     the whole-frame wall-latch gate. Returns (obj_dets, obstacle_dets).
 
@@ -88,13 +87,13 @@ def perceive_objects(img, w: int, h: int, indicators: set):
     # to a door we ALSO request the obstacle classes so the corridor watchdog can see
     # chairs/people/etc. in the path.
     wanted = set(indicators)
-    if _state["mode"] == "go_door":
+    if st["mode"] == "go_door":
         wanted |= OBSTACLE_CLASSES
-    wanted_ids = [_name_to_id[c] for c in wanted if c in _name_to_id]
-    res = _model.predict(img, verbose=False, conf=CONF, classes=wanted_ids or None)[0]
+    wanted_ids = [models._name_to_id[c] for c in wanted if c in models._name_to_id]
+    res = models._model.predict(img, verbose=False, conf=CONF, classes=wanted_ids or None)[0]
     obj_dets = []  # (cls_name, conf, [x1,y1,x2,y2])
     for b in res.boxes:
-        ocls = _names[int(b.cls[0])]
+        ocls = models._names[int(b.cls[0])]
         oconf = float(b.conf[0])
         oxy = [float(v) for v in b.xyxy[0]]
         # Whole-scene latch gate — same pathology as walls-as-doors, via COCO this
@@ -102,7 +101,7 @@ def perceive_objects(img, w: int, h: int, indicators: set):
         # indicator -> FALSE ARRIVAL. While scanning or confirming, the user stands
         # mid-room, so a real indicator never fills the whole frame. (go_door close
         # approaches are exempt, where filling the frame is legitimate.)
-        if _state["mode"] in ("discover", "go_indicator", "face_target"):
+        if st["mode"] in ("discover", "go_indicator", "face_target"):
             ofrac = ((oxy[2] - oxy[0]) * (oxy[3] - oxy[1])) / float(w * h)
             if ofrac > DOOR_MAX_FRAME_FRAC:
                 if DOOR_DEBUG:
@@ -112,26 +111,26 @@ def perceive_objects(img, w: int, h: int, indicators: set):
         obj_dets.append((ocls, oconf, oxy))
 
     obstacle_dets = ([d for d in obj_dets if d[0] in OBSTACLE_CLASSES]
-                     if _state["mode"] == "go_door" else [])
+                     if st["mode"] == "go_door" else [])
     return obj_dets, obstacle_dets
 
 
 # --- stage 2: the door stack -----------------------------------------------------
 
-def process_doors(img, w: int, h: int, obj_dets):
+def process_doors(st, img, w: int, h: int, obj_dets):
     """Run the door model and the 3-layer door funnel (geometry gates -> semantic
     verification -> fridge arbitration -> cross-model de-confusion).
 
     Returns (obj_dets, door_dets, near_box, vdoor): the (possibly trimmed) obj_dets,
     the verified doors [(conf, [x1,y1,x2,y2])], whether a close-range panel saturates
     the frame, and the verifier's door boxes (for the tighter distance measurement)."""
-    dres = _door_model.predict(img, verbose=False, conf=DOOR_CONF)[0]
+    dres = models._door_model.predict(img, verbose=False, conf=DOOR_CONF)[0]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # for the blank-wall edge gate
     door_cands = []  # geometric-gate survivors, pending semantic verification
     door_dets = []   # (conf, [x1,y1,x2,y2]) — verified doors
     near_box = False  # a huge door box saturating the frame (close-range panel view)
     for b in dres.boxes:
-        cname = _door_model.names[int(b.cls[0])]
+        cname = models._door_model.names[int(b.cls[0])]
         conf = float(b.conf[0])
         xy = [float(v) for v in b.xyxy[0]]
         bw, bh = xy[2] - xy[0], xy[3] - xy[1]
@@ -143,11 +142,11 @@ def process_doors(img, w: int, h: int, obj_dets):
             dens = _edge_density(gray, xy)
             wh = bw / bh if bh > 0 else 99.0
             frame_frac = (bw * bh) / float(w * h) if (w and h) else 0.0
-            too_big = frame_frac > DOOR_MAX_FRAME_FRAC and _state["mode"] == "discover"
+            too_big = frame_frac > DOOR_MAX_FRAME_FRAC and st["mode"] == "discover"
             # Close-range panel view: a door at arm's length fills the frame height but
             # is SMOOTH inside, so the edge gate rejects it. Flag it for the transit
             # logic — only honoured there if a tracked approach got us close first.
-            if _state["mode"] == "go_door" and conf >= 0.5 and bh / h >= DOOR_FILL_FRAC:
+            if st["mode"] == "go_door" and conf >= 0.5 and bh / h >= DOOR_FILL_FRAC:
                 near_box = True
             # Edge density is NOT a hard gate any more: plain doors in dim light score
             # as low as blank walls. Smooth candidates go to the verifier instead,
@@ -163,10 +162,10 @@ def process_doors(img, w: int, h: int, obj_dets):
     # --- Semantic verification (4-class DoorDetect second opinion). Geometry can't
     # tell a lace curtain from a door, and COCO sometimes calls a real door a fridge.
     vdoor, vhandle, vfridge = [], [], []
-    if _verify_model is not None and (door_cands or any(o[0] == "refrigerator" for o in obj_dets)):
-        vres = _verify_model.predict(img, verbose=False, conf=VERIFY_CONF)[0]
+    if models._verify_model is not None and (door_cands or any(o[0] == "refrigerator" for o in obj_dets)):
+        vres = models._verify_model.predict(img, verbose=False, conf=VERIFY_CONF)[0]
         for b in vres.boxes:
-            vname = _verify_model.names[int(b.cls[0])]
+            vname = models._verify_model.names[int(b.cls[0])]
             vxy = [float(v) for v in b.xyxy[0]]
             if vname == "door":
                 vdoor.append(vxy)
@@ -189,10 +188,10 @@ def process_doors(img, w: int, h: int, obj_dets):
         # vetoing frames it SIMULTANEOUSLY corroborated as doors (corro=True) kept
         # breaking detection streaks on the actual door.
         veto = fridge_like and not corro
-        if dens >= DOOR_EDGE_MIN or _verify_model is None:
+        if dens >= DOOR_EDGE_MIN or models._verify_model is None:
             # Textured interior (frame/seams/handle visible): confidence or
             # corroboration passes it, as before.
-            ok = not veto and (_verify_model is None or conf >= DOOR_STRONG_CONF or corro)
+            ok = not veto and (models._verify_model is None or conf >= DOOR_STRONG_CONF or corro)
         else:
             # Smooth interior: a blank wall OR a plain door in dim light — confidence
             # CANNOT tell them apart (walls score 0.9 too), so only semantic proof
@@ -217,10 +216,10 @@ def process_doors(img, w: int, h: int, obj_dets):
     # pointing at the appliance, the door model routinely fires on real fridges, and
     # this drop was starving the confirmation of its fridge sightings for ~17 s.
     # The confidence-based cross-suppression below still arbitrates the same-box clash.
-    confirm_phase = (_state["mode"] == "go_indicator"
-                     or (_state["mode"] == "face_target"
-                         and _state["target_kind"] == "indicator"))
-    if _verify_model is not None and door_cands and not confirm_phase:
+    confirm_phase = (st["mode"] == "go_indicator"
+                     or (st["mode"] == "face_target"
+                         and st["target_kind"] == "indicator"))
+    if models._verify_model is not None and door_cands and not confirm_phase:
         kept_objs = []
         for cls, ocf, oxy in obj_dets:
             if (cls == "refrigerator"
@@ -286,9 +285,9 @@ class DoorGeom:
     corro: bool = False  # was this frame's strongest door verifier-corroborated?
 
 
-def door_geometry(door_dets, vdoor, w: int, h: int) -> DoorGeom:
+def door_geometry(st, door_dets, vdoor, w: int, h: int) -> DoorGeom:
     """Bearing + distance of the strongest door, its 2-of-3 temporal confirmation, and
-    the steadied step distance. Updates the rolling `_door_hist` and remembers how close
+    the steadied step distance. Updates the rolling `st.door_hist` and remembers how close
     the approach got (`last_door_dist`)."""
     best_corro = False
     if door_dets:
@@ -311,13 +310,13 @@ def door_geometry(door_dets, vdoor, w: int, h: int) -> DoorGeom:
                   flush=True)
     else:
         region, dist_m, cur_frac, door_cx_frac = None, None, 0.0, None
-    _door_hist.append((region, dist_m) if region else None)
-    confirmed_doors = [d for d in _door_hist if d]
+    st.door_hist.append((region, dist_m) if region else None)
+    confirmed_doors = [d for d in st.door_hist if d]
     door_confirmed = len(confirmed_doors) >= MIN_HITS
     # Steady the step count with the median distance over the window (less jitter).
     _dists = sorted(d[1] for d in confirmed_doors if d[1] is not None)
     door_dist = _dists[len(_dists) // 2] if _dists else None
     if door_confirmed and door_dist is not None:
-        _state["last_door_dist"] = door_dist  # remember how close the approach got
+        st["last_door_dist"] = door_dist  # remember how close the approach got
     return DoorGeom(region, dist_m, cur_frac, door_cx_frac, door_confirmed, door_dist,
                     best_corro)

@@ -61,6 +61,12 @@ class Router:
             state = payload.get("state", "still")
             if state in ("still", "moving", "walking"):
                 self.session.motion_state = state
+        elif mtype == "heading":
+            # Phone compass heading (degrees, clockwise). Drives the
+            # navigation task's 360 room scan and bearing math.
+            deg = payload.get("degrees")
+            if isinstance(deg, (int, float)) and 0.0 <= float(deg) < 360.0:
+                self.session.heading = float(deg)
         else:
             log.info("Session %s: unknown JSON type %r (ignored)",
                      self.session.id, mtype)
