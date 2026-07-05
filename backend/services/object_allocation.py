@@ -63,10 +63,20 @@ GUIDANCE_REAFFIRM_SEC = 6.0     # re-speak unchanged guidance at most this often
 SCAN_PROMPT_INTERVAL_SEC = 8.0  # cadence of "turn around" prompts while unseen
 TASK_TIMEOUT_SEC = 60.0         # give up if never seen within this many seconds
 
+# Debounce spatial changes so YOLO's frame-to-frame box jitter around a
+# bucket boundary doesn't cause "medium -> near -> medium -> ..." spam.
+# We require the same (region, distance) for this many consecutive frames
+# before switching the "official" bucket. 2 frames ~= 400 ms at 5 FPS.
+SPATIAL_STREAK_TO_ACCEPT = 2
+
 # Reach mode (Sprint 5: hand guidance, only fires when target is near AND a
-# hand is detected). Cues feel more urgent than body-direction cues, so the
-# re-affirm interval is shorter.
-REACH_REAFFIRM_SEC = 3.0
+# hand is detected).
+REACH_REAFFIRM_SEC = 5.0
+
+# Once reach mode has spoken, don't fall back to body-direction guidance
+# until the hand has been absent for this long. Handles the case where
+# MediaPipe momentarily fails to detect the hand between two good frames.
+REACH_GRACE_SEC = 3.0
 
 
 class GuidanceTracker:
@@ -109,6 +119,24 @@ class GuidanceTracker:
         self.last_reach_key: Optional[tuple[str, str]] = None
         self.last_reach_at = 0.0
 
+        # Spatial debouncing (Sprint 5 refinement). YOLO's box size flickers
+        # frame-to-frame near bucket boundaries; we require SPATIAL_STREAK_TO_ACCEPT
+        # consecutive frames of the same (region, distance) to switch the
+        # "official" bucket used for phrase selection.
+        self._raw_spatial_key: Optional[tuple[str, str]] = None
+        self._spatial_streak = 0
+
+        # Haptic-pulse hint the loop should ship after this update(). None
+        # means "no vibration this frame". The loop reads and clears it every
+        # tick. Set by _update_reach when the fingertip enters "almost" or
+        # "touching" states.
+        self.pending_haptic: Optional[str] = None
+
+        # Previous motion state, used to detect a still -> moving transition
+        # and reset the smoothed spatial state so the guidance re-issues
+        # immediately after the user actually moved.
+        self._prev_motion_state: str = "still"
+
     def should_check_hand(self) -> bool:
         """Cheap pre-check for the detection loop: only worth running
         MediaPipe when the target was most recently classified as 'near'.
@@ -121,12 +149,26 @@ class GuidanceTracker:
         frame_shape: Optional[Sequence[int]],
         now: float,
         hand_pose=None,
+        motion_state: str = "still",
     ) -> Optional[tuple[str, Optional[str]]]:
         if self.started is None:
             self.started = now
             # Delay the first scan prompt by a full interval so it doesn't talk
             # over the "Looking for your cup" confirmation at task start.
             self.last_scan_at = now
+
+        # Motion-aware: if the user has just started moving, reset the
+        # smoothed spatial state so guidance responds immediately to their
+        # new position. The debounce is there to filter YOLO jitter while
+        # the user is still, not to hide real position changes.
+        entered_motion = (motion_state != "still"
+                          and self._prev_motion_state == "still")
+        if entered_motion:
+            self._spatial_streak = 0
+            self._raw_spatial_key = None
+            self.last_spoken_key = None   # so next detection is announced fresh
+        self._prev_motion_state = motion_state
+        force_accept_bucket = motion_state != "still"
 
         # Safety net: give up if we've never seen the target in time.
         if not self.ever_seen and (now - self.started) >= self.timeout_sec:
@@ -145,24 +187,48 @@ class GuidanceTracker:
             # occupying 18 % is also "near", same image -> different verdict.
             info = spatial_reasoning.locate(best.box, w, h, label=best.label)
             self.ever_seen = True
-            self.last_region = info.region
-            self.last_distance = info.distance
 
-            # Reach mode: target is within arm's reach AND we can see the
-            # user's hand. The body-direction guidance has done its job; now
-            # we're guiding the hand to the box and waiting for contact.
-            if info.distance == "near" and hand_pose is not None:
+            # Spatial debounce: don't accept a new (region, distance) bucket
+            # until we've seen it SPATIAL_STREAK_TO_ACCEPT times in a row.
+            # This filters YOLO's per-frame box-size jitter that used to fire
+            # 3 different phrases in 600 ms.
+            raw_key = (info.region, info.distance)
+            if raw_key == self._raw_spatial_key:
+                self._spatial_streak += 1
+            else:
+                self._raw_spatial_key = raw_key
+                self._spatial_streak = 1
+            first_bucket_ever = self.last_distance is None
+            if (first_bucket_ever
+                    or force_accept_bucket
+                    or self._spatial_streak >= SPATIAL_STREAK_TO_ACCEPT):
+                self.last_region = info.region
+                self.last_distance = info.distance
+            # Everything downstream uses the smoothed self.last_* values.
+            effective_info = _replace_info(info, self.last_region, self.last_distance)
+
+            # Reach mode: target is near AND we can see the user's hand.
+            if self.last_distance == "near" and hand_pose is not None:
                 return self._update_reach(best, hand_pose, w, h, now)
 
+            # Grace period: hand momentarily lost while we're still near?
+            # Stay silent for a few seconds rather than switching back to
+            # body-direction mode (which would then alternate with reach
+            # mode every ~200 ms on hand-detection flicker).
+            if (self.last_distance == "near" and hand_pose is None
+                    and self.last_reach_key is not None
+                    and (now - self.last_reach_at) < REACH_GRACE_SEC):
+                return None
+
             # Otherwise: standard direction + distance guidance.
-            key = (info.region, info.distance)
+            key = (self.last_region, self.last_distance)
             stale = (now - self.last_spoken_at) >= self.reaffirm_sec
             if key != self.last_spoken_key or stale:
                 first = self.last_spoken_key is None
                 phrase = (
-                    guidance_generator.first_seen_phrase(self.target, info)
+                    guidance_generator.first_seen_phrase(self.target, effective_info)
                     if first
-                    else guidance_generator.guidance_phrase(self.target, info)
+                    else guidance_generator.guidance_phrase(self.target, effective_info)
                 )
                 self.last_spoken_key = key
                 self.last_spoken_at = now
@@ -201,6 +267,9 @@ class GuidanceTracker:
         ("reach", phrase) - directional or "almost" cue, throttled.
         None              - same cue as last time and still within the
                             re-affirm window.
+
+        Also sets ``self.pending_haptic`` when the reach state changes into
+        "almost" or "touching" - the loop ships it as a vibration cue.
         """
         reach = reach_guidance.assess_reach(
             best_det.box, hand_pose.fingertip, w, h,
@@ -213,11 +282,21 @@ class GuidanceTracker:
                 return None
             self.last_reach_key = ("touching", "center")
             self.last_reach_at = now
+            self.pending_haptic = "long"  # the "you got it" pulse
             return ("touch", reach_guidance.reach_phrase(self.target, reach))
 
         key = (reach.state, reach.direction)
         stale = (now - self.last_reach_at) >= REACH_REAFFIRM_SEC
         if key != self.last_reach_key or stale:
+            # Transition INTO "almost" gets a short haptic pulse - a
+            # non-audio cue that the user is on target and just needs to
+            # push forward. Directional changes stay purely voice.
+            entered_almost = (
+                reach.state == "almost"
+                and (self.last_reach_key is None or self.last_reach_key[0] != "almost")
+            )
+            if entered_almost:
+                self.pending_haptic = "short"
             self.last_reach_key = key
             self.last_reach_at = now
             return ("reach", reach_guidance.reach_phrase(self.target, reach))
@@ -245,6 +324,23 @@ def _cancel_existing(session: "Session") -> None:
     session.detection_task = None
 
 
+def _replace_info(info, region: str, distance: str):
+    """Return a SpatialInfo copy with a smoothed region/distance override.
+
+    Used by GuidanceTracker to feed guidance_generator the *debounced*
+    bucket rather than the raw per-frame one, so phrases don't ping-pong
+    when YOLO's box size jitters across a threshold.
+    """
+    return spatial_reasoning.SpatialInfo(
+        region=region,
+        distance=distance,
+        cx_frac=info.cx_frac,
+        area_frac=info.area_frac,
+        apparent_frac=info.apparent_frac,
+        label=info.label,
+    )
+
+
 def _detect_target(frame, target: str) -> list:
     """Blocking helper run in a thread: detect ``target`` instances in ``frame``."""
     return yolo_service.detect(
@@ -253,7 +349,11 @@ def _detect_target(frame, target: str) -> list:
 
 
 async def _speak(session: "Session", text: str) -> None:
-    """Synthesize ``text`` (in a thread) and push the MP3 to the client."""
+    """Synthesize ``text`` (in a thread) and push the MP3 to the client.
+
+    Passes ``text`` to send_tts so the "repeat that" voice command can replay
+    any guidance line.
+    """
     if not text:
         return
     loop = asyncio.get_running_loop()
@@ -262,7 +362,7 @@ async def _speak(session: "Session", text: str) -> None:
     except Exception:
         log.exception("Session %s: guidance TTS failed for %r", session.id, text)
         return
-    await session.send_tts(mp3)
+    await session.send_tts(mp3, text=text)
     log.info("Session %s: OA guidance: %r", session.id, text)
 
 
@@ -300,7 +400,21 @@ async def _run(session: "Session", target: str) -> None:
                     hand_pose = None
 
             frame_shape = frame.shape if frame is not None else None
-            result = tracker.update(detections, frame_shape, now, hand_pose=hand_pose)
+            result = tracker.update(
+                detections, frame_shape, now,
+                hand_pose=hand_pose,
+                motion_state=getattr(session, "motion_state", "still"),
+            )
+
+            # Ship any pending haptic pulse the tracker set this tick, before
+            # the phrase - a short vibration a beat before the voice cue is
+            # a nicer "you're close" signal than after.
+            if tracker.pending_haptic is not None:
+                try:
+                    await session.send_haptic(tracker.pending_haptic)
+                except Exception:
+                    log.exception("Session %s: haptic send failed", session.id)
+                tracker.pending_haptic = None
 
             if result is not None:
                 action, phrase = result

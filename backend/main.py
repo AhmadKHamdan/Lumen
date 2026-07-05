@@ -27,8 +27,29 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from api.session import Session
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that tells the browser not to cache the frontend.
+
+    Mobile browsers (especially iOS Safari) hold onto cached JS aggressively
+    and ignore standard revalidation on WebSocket / MP3 flows. During
+    iteration a stale ``app.js`` will silently reintroduce bugs the fix
+    already removed - we've been bitten by exactly this. Serving the frontend
+    with ``Cache-Control: no-cache, no-store, must-revalidate`` means every
+    page load fetches the current source. It's a few extra KBs on the wire,
+    fine for our use.
+    """
+
+    async def get_response(self, path: str, scope: Scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +90,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     log.info("Session %s connected from %s", session.id, ws.client)
 
     try:
+        await session.send_session_hello()
         await session.send_initial_state()
         await session.run()
     except WebSocketDisconnect:
@@ -91,7 +113,7 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 if FRONTEND_DIR.is_dir():
     # html=True makes GET / serve index.html, and unknown paths under /
     # fall back to index.html only if they don't exist (handy for SPAs).
-    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
-    log.info("Serving frontend from %s", FRONTEND_DIR)
+    app.mount("/", _NoCacheStaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    log.info("Serving frontend from %s (no-cache headers)", FRONTEND_DIR)
 else:
     log.warning("Frontend directory not found at %s; serving API only", FRONTEND_DIR)

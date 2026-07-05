@@ -116,6 +116,40 @@ def complete_phrase(target: str) -> str:
     return f"Great. Glad you found your {target}."
 
 
+_DIRECTION_CLAUSE = {
+    "left": "on your left",
+    "right": "on your right",
+    "center": "straight ahead",
+}
+
+
+def describe_scene_phrase(detections, frame_shape) -> str:
+    """Compose a spoken scene readout for the "describe" voice command.
+
+    Takes up to the four highest-confidence YOLO detections, classifies each
+    into a region via spatial_reasoning, and joins them into a natural
+    sentence. Pure - no I/O, no model.
+    """
+    # Local import so this module stays lightweight; spatial_reasoning is
+    # itself pure and cheap.
+    from services import spatial_reasoning
+
+    if not detections:
+        return "I don't see anything I recognise."
+    h, w = int(frame_shape[0]), int(frame_shape[1])
+    top = sorted(detections, key=lambda d: d.confidence, reverse=True)[:4]
+    parts: list[str] = []
+    for det in top:
+        info = spatial_reasoning.locate(det.box, w, h, label=det.label)
+        clause = _DIRECTION_CLAUSE.get(info.region, "in front of you")
+        parts.append(f"a {det.label} {clause}")
+    if len(parts) == 1:
+        return f"I see {parts[0]}."
+    if len(parts) == 2:
+        return f"I see {parts[0]}, and {parts[1]}."
+    return "I see " + ", ".join(parts[:-1]) + f", and {parts[-1]}."
+
+
 def cancel_phrase(target: str) -> str:
     """Spoken when the user cancels the search.
 

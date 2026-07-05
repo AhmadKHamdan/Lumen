@@ -68,7 +68,11 @@ def test_same_position_within_window_does_not_repeat():
 def test_position_change_triggers_new_guidance():
     tracker = GuidanceTracker("cup")
     _confirm(tracker, t0=100.0)
-    res = tracker.update([LEFT_FAR], SHAPE, 100.6)
+    # Spatial debounce requires 2 consecutive frames of the new bucket before
+    # switching, so the first LEFT frame is a no-op and the second is what
+    # actually triggers the new phrase.
+    assert tracker.update([LEFT_FAR], SHAPE, 100.6) is None
+    res = tracker.update([LEFT_FAR], SHAPE, 100.8)
     assert res is not None
     action, phrase = res
     assert action == "guide"

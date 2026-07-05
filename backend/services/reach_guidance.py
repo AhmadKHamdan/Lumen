@@ -33,8 +33,9 @@ from typing import Sequence
 
 # Fingertip-to-target-centroid distance (in fraction of frame width OR height)
 # below which we consider the user "almost there" instead of naming a
-# direction. Roughly 10% of the frame in either axis.
-ALMOST_CENTER_FRAC = 0.10
+# direction. Wider than the initial 10% so we don't chatter with tiny left/right
+# flips when the fingertip is nearly on target.
+ALMOST_CENTER_FRAC = 0.15
 
 
 @dataclass(frozen=True)
@@ -88,8 +89,12 @@ def assess_reach(
     if max(abs_dxf, abs_dyf) < ALMOST_CENTER_FRAC:
         return ReachInfo("almost", "center", dxf, dyf)
 
-    # Otherwise name the dominant-axis direction.
-    if abs_dxf >= abs_dyf:
+    # Pick the dominant axis by PIXEL magnitude, not fractional. Frame width
+    # (640) is bigger than height (480), so comparing fractions used to bias
+    # toward the vertical axis - a 30 px offset in both x and y came out
+    # as dxf=0.047 < dyf=0.063, triggering an up/down cue instead of a
+    # left/right cue. Pixel comparison matches human intuition.
+    if abs(dx) >= abs(dy):
         direction = "right" if dx > 0 else "left"
     else:
         direction = "down" if dy > 0 else "up"
@@ -104,13 +109,14 @@ def reach_phrase(target: str, info: ReachInfo) -> str:
         return f"Your hand is on the {target}. Grasp it."
     if info.state == "almost":
         return "Almost there. Reach forward."
+    # Consistent "Move your hand X" wording across all four directions.
     if info.direction == "left":
         return "Move your hand to the left."
     if info.direction == "right":
         return "Move your hand to the right."
     if info.direction == "up":
-        return "Raise your hand up."
+        return "Move your hand up."
     if info.direction == "down":
-        return "Lower your hand."
+        return "Move your hand down."
     # Defensive default.
     return "Reach forward."

@@ -24,9 +24,11 @@ ENV/
 backend/captured_audio/*
 !backend/captured_audio/.gitkeep
 
-# ML model weights (auto-downloaded by ultralytics on first detect)
+# ML model weights (auto-downloaded on first inference)
 *.pt
+*.task
 backend/yolov8n.pt
+backend/hand_landmarker.task
 
 # Frontend
 node_modules/

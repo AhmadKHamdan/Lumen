@@ -5,6 +5,29 @@ import { WSClient, TAG_FRAME, TAG_COMMAND_AUDIO, TAG_TTS } from "./ws_client.js"
 import { MediaController } from "./media.js";
 import { AudioQueue } from "./audio_queue.js";
 import { WakeLockManager } from "./wakelock.js";
+import { MotionMonitor } from "./motion.js";
+
+// ---------- browser TTS fallback ----------
+//
+// Used when the server can't reach us (WS closed, error before Start), or when
+// a server-side error message is worth speaking aloud. The primary voice
+// channel is still gTTS + AudioQueue; this is the safety net.
+function speakLocally(text, {rate = 1.0, volume = 1.0} = {}) {
+  if (!text) return;
+  const synth = window.speechSynthesis;
+  if (!synth) return;   // very old browser
+  try {
+    synth.cancel();     // stop any previous local speech
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.rate = rate;
+    utter.volume = volume;
+    utter.lang = "en-US";
+    synth.speak(utter);
+  } catch (e) {
+    console.warn("speechSynthesis failed", e);
+  }
+}
+
 
 // Backend URL.
 //
@@ -46,8 +69,26 @@ const ws = new WSClient(backendURL());
 const media = new MediaController(videoEl);
 const audioQueue = new AudioQueue();
 const wakeLock = new WakeLockManager();
+const motion = new MotionMonitor((state) => {
+  // Only meaningful while a session is active. Server still tolerates late
+  // messages, but no point sending noise otherwise.
+  if (!active) return;
+  ws.sendJson({ type: "motion", state });
+});
 
 let active = false;  // true between Start and Stop
+
+// ---------- session persistence ----------
+//
+// Server assigns a session id on every WS accept and sends it via a
+// `session_hello` message. We stash it in localStorage. On our NEXT connect
+// (after a drop, reload, or reopen), we send `resume` with the previous id;
+// if the server still has an active task saved for that id, it re-fires the
+// task and announces "Resuming search for your cup."
+const SESSION_ID_KEY = "lumen.session_id";
+let sessionId = null;
+try { sessionId = window.localStorage.getItem(SESSION_ID_KEY); }
+catch (_) { /* private mode / storage blocked */ }
 
 // ---------- WS subscriptions ----------
 
@@ -55,6 +96,26 @@ ws.onConnectionChange((state) => {
   console.log("conn:", state);
   connIndicator.textContent = state;
   connIndicator.className = `status-pill conn-${state}`;
+  // Only announce unexpected disconnects, and only if the user is mid-session
+  // (active). A clean stop shouldn't be announced.
+  if (state === "disconnected" && active) {
+    speakLocally("Connection lost. Trying to reconnect.");
+  }
+  if (state === "connected" && sessionId) {
+    // Ask the server to restore whatever task we had before the drop. If
+    // the server has no live state for this id (fresh install or TTL
+    // expired), it silently no-ops - harmless.
+    ws.sendJson({ type: "resume", id: sessionId });
+  }
+});
+
+ws.on("session_hello", (msg) => {
+  if (msg && msg.id) {
+    sessionId = msg.id;
+    try { window.localStorage.setItem(SESSION_ID_KEY, sessionId); }
+    catch (_) {}
+    console.log("session id:", sessionId);
+  }
 });
 
 ws.on("fsm_state", (msg) => {
@@ -77,11 +138,33 @@ ws.on("transcription", (msg) => {
 ws.on("error", (msg) => {
   console.warn("server error:", msg);
   lastError.textContent = msg.message || "Server error.";
+  // No local speech here. The server follows most user-facing errors with a
+  // gTTS clip; layering browser TTS on top produced the "two voices"
+  // double-up. Errors that don't get a gTTS clip are visual-only.
 });
 
 ws.onBinary(TAG_TTS, (bytes) => {
   console.log(`TTS clip received: ${bytes.byteLength} bytes`);
   audioQueue.enqueue(bytes);
+});
+
+// Haptic feedback for reach cues, completion, and cancel. Server sends a
+// pattern name; we map to a navigator.vibrate() millisecond sequence.
+// iOS Safari has no Vibration API, so vibrate() is undefined - we degrade
+// silently and the voice cues remain the primary channel.
+const HAPTIC_PATTERNS = {
+  short:   [40],           // reach "almost" - one brief tap
+  medium:  [80],           // generic ack
+  long:    [200],          // fingertip touched the target
+  success: [40, 60, 40],   // "got it"
+  cancel:  [120],          // task_abort
+};
+ws.on("haptic", (msg) => {
+  const pattern = HAPTIC_PATTERNS[msg.pattern];
+  if (!pattern) return;
+  if (typeof navigator.vibrate !== "function") return;  // iOS
+  try { navigator.vibrate(pattern); }
+  catch (e) { console.warn("navigator.vibrate failed", e); }
 });
 
 // ---------- media wiring ----------
@@ -115,13 +198,20 @@ btnStart.addEventListener("click", async () => {
     await media.start();
   } catch (e) {
     console.error("media.start failed", e);
-    lastError.textContent = e.message === "camera-permission-denied"
-      ? "Camera/microphone permission denied. Reload and try again."
-      : "Could not start camera or microphone.";
+    const errText = e.message === "camera-permission-denied"
+      ? "Camera or microphone permission denied. Please reload and allow access."
+      : "Could not start the camera or microphone.";
+    lastError.textContent = errText;
+    // Server can't TTS this - the WS isn't even open yet. Speak locally.
+    speakLocally(errText);
     return;
   }
 
   await wakeLock.acquire();
+  // Start the device-motion monitor from inside the gesture - iOS 13+
+  // requires that for permission. Fire-and-forget; failure just means the
+  // server won't see motion updates and falls back to plain debouncing.
+  motion.start().catch((e) => console.warn("motion.start failed", e));
   ws.connect();
 
   // Wait briefly for the WebSocket to open before sending start.
@@ -146,6 +236,7 @@ btnStop.addEventListener("click", async () => {
   media.stopFrameLoop();
   await media.stop();
   await wakeLock.release();
+  motion.stop();
   ws.close();
 
   btnStart.disabled = false;
@@ -154,31 +245,48 @@ btnStop.addEventListener("click", async () => {
   btnPTT.classList.remove("recording");
 });
 
-// PTT: pointerdown to start recording, pointerup/pointercancel to stop.
-function attachPTT(btn) {
+// Tap-anywhere PTT. Any pointer-down anywhere on the page (except on
+// interactive controls that would clash - Start, Stop, form fields, links)
+// starts recording; the matching pointer-up stops it. The visible PTT button
+// is kept as a large tactile target and visual "recording" indicator, but a
+// blind user no longer has to hunt for it - any part of the screen works.
+//
+// We attach at document level so a drag that leaves the original tap target
+// still fires pointerup and stops recording cleanly.
+function attachTapAnywherePTT() {
+  const EXCLUDED_SELECTOR =
+    "#btn-start, #btn-stop, a, input, textarea, select, [data-no-ptt]";
+  let recordingViaTap = false;
+
   const onDown = (ev) => {
     if (!active) return;
+    // Don't hijack taps that would activate Start / Stop or other controls.
+    if (ev.target.closest && ev.target.closest(EXCLUDED_SELECTOR)) return;
+    // Only left-button / primary pointer.
+    if (ev.pointerType === "mouse" && ev.button !== 0) return;
     ev.preventDefault();
     media.startRecording();
-    btn.classList.add("recording");
-    try { btn.setPointerCapture(ev.pointerId); } catch (_) {}
+    btnPTT.classList.add("recording");
+    recordingViaTap = true;
   };
+
   const onUp = (ev) => {
-    if (!active) return;
-    ev.preventDefault();
+    if (!recordingViaTap) return;
+    if (ev && ev.preventDefault) ev.preventDefault();
     media.stopRecording();
-    btn.classList.remove("recording");
-    try { btn.releasePointerCapture(ev.pointerId); } catch (_) {}
+    btnPTT.classList.remove("recording");
+    recordingViaTap = false;
   };
-  btn.addEventListener("pointerdown", onDown);
-  btn.addEventListener("pointerup", onUp);
-  btn.addEventListener("pointercancel", onUp);
-  btn.addEventListener("pointerleave", (ev) => {
-    if (btn.classList.contains("recording")) onUp(ev);
-  });
+
+  document.addEventListener("pointerdown", onDown);
+  document.addEventListener("pointerup", onUp);
+  document.addEventListener("pointercancel", onUp);
+  // Safety net: if the tab loses focus mid-recording (e.g. iOS home button),
+  // stop cleanly instead of leaving the mic hot.
+  window.addEventListener("blur", () => onUp(null));
 }
 
-attachPTT(btnPTT);
+attachTapAnywherePTT();
 
 // ---------- helpers ----------
 

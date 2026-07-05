@@ -104,8 +104,8 @@ def test_almost_threshold_constant_sane():
 @pytest.mark.parametrize("direction, needle", [
     ("left", "to the left"),
     ("right", "to the right"),
-    ("up", "raise"),
-    ("down", "lower"),
+    ("up", "hand up"),
+    ("down", "hand down"),
 ])
 def test_phrase_per_direction(direction, needle):
     info = ReachInfo(state="approach", direction=direction, dx_frac=0.2, dy_frac=0.2)

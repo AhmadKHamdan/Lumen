@@ -43,6 +43,43 @@ _STATE_WIRE_NAMES: dict[FSMState, str] = {
 }
 
 
+# ---------- resume pool (session persistence across reconnects) ----------
+#
+# When a WS drops mid-task, the client's next connect can send a `resume`
+# message with the previous session id. If we still have the task target
+# saved here, we re-fire the task on the new session and announce it.
+# TTL keeps the pool bounded and stale ids from surprising anyone.
+
+RESUME_TTL_SEC = 5 * 60
+
+_resume_pool: dict[str, dict] = {}
+
+
+def _prune_resume_pool() -> None:
+    now = time.time()
+    stale = [sid for sid, s in _resume_pool.items() if s["expires_at"] < now]
+    for sid in stale:
+        del _resume_pool[sid]
+
+
+def save_task_for_resume(session_id: str, task_type: str, target: str) -> None:
+    """Called on graceful disconnect if a task was active."""
+    _prune_resume_pool()
+    _resume_pool[session_id] = {
+        "task_type": task_type,
+        "target": target,
+        "expires_at": time.time() + RESUME_TTL_SEC,
+    }
+    log.info("Saved resume state for %s: %s/%s", session_id, task_type, target)
+
+
+def take_task_for_resume(session_id: str) -> Optional[dict]:
+    """Called on a `resume` message. Pops and returns the saved state,
+    or None if there's no live entry for this id."""
+    _prune_resume_pool()
+    return _resume_pool.pop(session_id, None)
+
+
 class Session:
     """One Session per WebSocket connection."""
 
@@ -60,6 +97,23 @@ class Session:
         # Object Allocation detection loop). object_allocation.start/stop own
         # this; cleanup() cancels it on disconnect.
         self.detection_task: Optional[asyncio.Task] = None
+
+        # Last spoken TTS phrase, for the voice "repeat that" command. Updated
+        # whenever anything calls send_tts(mp3, text="...").
+        self.last_spoken_text: str = ""
+
+        # Client-provided session id, if any. Set by the "resume" message
+        # handler. When we later save state on disconnect, we key it by this
+        # id (falling back to self.id) so the client's next WS connect can
+        # find it. Enables cross-connection continuity if the phone drops
+        # Wi-Fi mid-task.
+        self.client_session_id: Optional[str] = None
+
+        # Coarse motion state reported by the phone's DeviceMotionEvent:
+        # "still" | "moving" | "walking". Used by GuidanceTracker to bypass
+        # the spatial debounce during real user motion (so bucket changes
+        # aren't hidden behind the smoothing when the user actually walked).
+        self.motion_state: str = "still"
 
         # FSM owned by this session
         self.fsm: TaskFSM = TaskFSM()
@@ -99,7 +153,22 @@ class Session:
                             self.id, list(msg.keys()))
 
     async def cleanup(self) -> None:
-        """Release any resources tied to this session."""
+        """Release any resources tied to this session.
+
+        If a task was active at disconnect time, save it to the resume pool
+        so the next WS connect can pick up where we left off.
+        """
+        # Save resume state BEFORE clearing task_context.
+        active_type = self.task_context.get("task_type") if self.task_context else None
+        if active_type == "object_allocation":
+            target = self.task_context.get("target", "")
+            if target:
+                save_task_for_resume(self.id, "object_allocation", target)
+        elif active_type == "navigation":
+            dest = self.task_context.get("destination", "")
+            if dest:
+                save_task_for_resume(self.id, "navigation", dest)
+
         # Cancel any running task loop (Object Allocation detection, etc.).
         task = self.detection_task
         if task is not None and not task.done():
@@ -139,10 +208,41 @@ class Session:
         })
 
     async def send_error(self, code: str, message: str) -> None:
+        """Send an error JSON to the client. Client renders it visually; any
+        voice feedback comes from the follow-up gTTS clip (or from browser
+        speechSynthesis only for connection-level failures where we can't
+        reach the client)."""
         await self.send_json({"type": "error", "code": code, "message": message})
 
-    async def send_tts(self, mp3_bytes: bytes) -> None:
-        """Send a TTS MP3 clip to the client (binary tag 0x03)."""
+    async def send_session_hello(self) -> None:
+        """Tell the client its session id right after WS accept, so it can
+        stash the id and send a ``resume`` message on the next connect."""
+        await self.send_json({"type": "session_hello", "id": self.id})
+
+    async def send_haptic(self, pattern: str) -> None:
+        """Ask the client to vibrate. Pattern names are symbolic strings the
+        client maps to a ``navigator.vibrate`` millisecond sequence:
+
+            "short"   ~40 ms tap - enters reach "almost" zone
+            "medium"  ~80 ms tap - generic acknowledgement
+            "long"    ~200 ms  - fingertip touched the target box
+            "success" double-tap - task_complete via voice "got it"
+            "cancel"  single medium - task cancelled
+
+        The client silently ignores unknown patterns and iOS Safari - which
+        has no Vibration API at all - degrades to a no-op. Voice cues remain
+        the primary channel; haptics are complementary."""
+        await self.send_json({"type": "haptic", "pattern": pattern})
+
+    async def send_tts(self, mp3_bytes: bytes, text: str = "") -> None:
+        """Send a TTS MP3 clip to the client (binary tag 0x03).
+
+        If ``text`` is passed we also record it as ``last_spoken_text`` so the
+        voice "repeat that" command can replay it. Callers that don't care
+        about repeat (e.g. non-linguistic clips) can omit it.
+        """
+        if text:
+            self.last_spoken_text = text
         await self.send_binary(0x03, mp3_bytes)
 
     def _fire_cleanup_done(self) -> None:

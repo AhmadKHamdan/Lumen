@@ -16,13 +16,21 @@ offline inspection.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fsm.task_fsm import FSMState
-from services import command_parser, guidance_generator, speech_service, tts_service
+from services import (
+    command_parser,
+    guidance_generator,
+    spatial_reasoning,
+    speech_service,
+    tts_service,
+    yolo_service,
+)
 
 if TYPE_CHECKING:
     from api.session import Session
@@ -86,8 +94,17 @@ async def handle_command_audio(session: "Session", blob: bytes) -> None:
     await session.send_transcription(text, confidence)
 
     if not text:
-        await session.send_error("transcription_failed",
-                                 "Heard silence; please try again.")
+        # Nothing came back from Whisper. Speak a clarifying prompt AND send
+        # a machine-readable error so the frontend can log / react. The
+        # spoken cue matters most - a blind user has nothing to look at.
+        prompt = "I didn't hear anything. Please try again."
+        await session.send_error("transcription_failed", prompt)
+        try:
+            mp3 = tts_service.synthesize(prompt)
+        except Exception:
+            log.exception("Session %s: silence-prompt TTS failed", session.id)
+            return
+        await session.send_tts(mp3, text=prompt)
         return
 
     # 2. Parse intent
@@ -99,6 +116,12 @@ async def handle_command_audio(session: "Session", blob: bytes) -> None:
         # A confirm/cancel command said during (or just before) a task. This
         # path handles its own TTS and returns.
         await _handle_completion(session, intent)
+        return
+
+    if intent["task_type"] == "info":
+        # "describe" (scene readout) / "repeat" (replay last spoken phrase).
+        # Doesn't change FSM state - just answers.
+        await _handle_info(session, intent)
         return
 
     if intent["task_type"] == "object_allocation":
@@ -148,7 +171,7 @@ async def handle_command_audio(session: "Session", blob: bytes) -> None:
         log.exception("Session %s: TTS synthesis failed for %r",
                       session.id, confirm_text)
         return
-    await session.send_tts(mp3)
+    await session.send_tts(mp3, text=confirm_text)
     log.info("Session %s: sent TTS (%d bytes) for %r",
              session.id, len(mp3), confirm_text)
 
@@ -179,6 +202,7 @@ async def _handle_completion(session: "Session", intent: dict) -> None:
         if active:
             session.fsm.handle_event("task_complete")
             phrase = guidance_generator.complete_phrase(obj)
+            await session.send_haptic("success")
             log.info("Session %s: user confirmed completion of %r", session.id, obj)
         else:
             await session.send_error("protocol_violation",
@@ -193,6 +217,7 @@ async def _handle_completion(session: "Session", intent: dict) -> None:
             # the Start button - bad UX for a blind user mid-flow.
             session.fsm.handle_event("task_abort")
             phrase = guidance_generator.cancel_phrase(obj)
+            await session.send_haptic("cancel")
             log.info("Session %s: user aborted task -> LISTENING", session.id)
         elif state == FSMState.LISTENING:
             # Cancel said while we were waiting for a command: end the session.
@@ -208,6 +233,63 @@ async def _handle_completion(session: "Session", intent: dict) -> None:
         log.exception("Session %s: completion TTS failed for %r",
                       session.id, phrase)
         return
-    await session.send_tts(mp3)
+    await session.send_tts(mp3, text=phrase)
     log.info("Session %s: sent completion TTS (%d bytes) for %r",
              session.id, len(mp3), phrase)
+
+
+# ---------- info: describe / repeat ----------
+
+async def _handle_info(session: "Session", intent: dict) -> None:
+    """Route a describe / repeat query. Never mutates FSM state."""
+    target = intent.get("target")
+    if target == "describe":
+        await _handle_describe(session)
+    elif target == "repeat":
+        await _handle_repeat(session)
+    else:
+        await session.send_error("parse_unknown", "I didn't catch that.")
+
+
+async def _handle_describe(session: "Session") -> None:
+    """Run YOLO on the current frame and read the scene back."""
+    frame = session.latest_frame
+    if frame is None or getattr(frame, "size", 0) == 0:
+        phrase = "I don't have a camera view yet. Please press Start first."
+    else:
+        loop = asyncio.get_running_loop()
+        try:
+            # Higher confidence for describe: only mention things we're
+            # reasonably sure about, since the user has no visual cross-check.
+            detections = await loop.run_in_executor(
+                None, yolo_service.detect, frame, 0.5, None,
+            )
+        except Exception:
+            log.exception("Session %s: describe detection failed", session.id)
+            phrase = "Sorry, I couldn't look around just now."
+        else:
+            phrase = guidance_generator.describe_scene_phrase(detections, frame.shape)
+
+    try:
+        mp3 = tts_service.synthesize(phrase)
+    except Exception:
+        log.exception("Session %s: describe TTS failed for %r", session.id, phrase)
+        await session.send_error("tts_failed", phrase)
+        return
+    await session.send_tts(mp3, text=phrase)
+    log.info("Session %s: described scene: %r", session.id, phrase)
+
+
+async def _handle_repeat(session: "Session") -> None:
+    """Replay the last spoken TTS phrase, if any."""
+    text = session.last_spoken_text
+    phrase = text if text else "I haven't said anything yet."
+    try:
+        mp3 = tts_service.synthesize(phrase)
+    except Exception:
+        log.exception("Session %s: repeat TTS failed for %r", session.id, phrase)
+        return
+    # Don't overwrite last_spoken_text - future repeats should replay the same
+    # thing, not the "I haven't said anything yet" fallback.
+    await session.send_binary(0x03, mp3)
+    log.info("Session %s: repeated last phrase (%d chars)", session.id, len(phrase))

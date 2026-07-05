@@ -183,6 +183,39 @@ COMPLETION_CANCEL_PHRASES: tuple[str, ...] = (
     "give up",
 )
 
+# Info queries said at any time; don't change task state, just answer.
+#   describe = "what's around me / in front of me"
+#   repeat   = "say that again"
+INFO_DESCRIBE_PHRASES: tuple[str, ...] = (
+    "describe",
+    "describe it",
+    "describe the scene",
+    "what do you see",
+    "what can you see",
+    "what is around me",
+    "what is around",
+    "what is in front of me",
+    "what is in front",
+    "whats around me",
+    "whats in front of me",
+    "whats around",
+    "whats in front",
+    "look around",
+    "tell me what you see",
+)
+
+INFO_REPEAT_PHRASES: tuple[str, ...] = (
+    "repeat",
+    "repeat that",
+    "repeat it",
+    "say that again",
+    "say it again",
+    "say again",
+    "what did you say",
+    "again please",
+    "once more",
+)
+
 
 # ---------- thresholds ----------
 
@@ -196,6 +229,11 @@ COMBINED_THRESHOLD = 65       # average of prefix + noun must clear this
 # commands.
 COMPLETION_SCORE_THRESHOLD = 86
 COMPLETION_MAX_WORDS = 5
+
+# Info queries use the same matching approach with slightly wider utterance
+# limits ("what is in front of me" is 6 words).
+INFO_SCORE_THRESHOLD = 82
+INFO_MAX_WORDS = 8
 
 
 # ---------- main entry ----------
@@ -226,6 +264,18 @@ def parse(text: str) -> dict:
         return {
             "task_type": "completion",
             "target": target,  # "confirm" | "cancel"
+            "raw": raw,
+            "needs_clarification": False,
+            "score": round(score, 1),
+        }
+
+    # Info queries: "describe" / "what's in front of me" / "repeat that".
+    info = _match_info(norm, words)
+    if info is not None:
+        target, score = info
+        return {
+            "task_type": "info",
+            "target": target,  # "describe" | "repeat"
             "raw": raw,
             "needs_clarification": False,
             "score": round(score, 1),
@@ -298,6 +348,10 @@ def confirmation_phrase(intent: dict) -> str:
         # The object/destination isn't known here (target is confirm/cancel),
         # so the audio layer normally voices a target-aware phrase instead.
         return "Okay." if target == "cancel" else "Got it."
+    if ttype == "info":
+        # audio_handler builds a target-specific phrase (scene description or
+        # last-spoken repeat), so this is only a defensive default.
+        return "Okay."
     return "I didn't catch that, please repeat."
 
 
@@ -325,6 +379,33 @@ def _unknown(raw: str) -> dict:
         "needs_clarification": True,
         "score": 0.0,
     }
+
+
+def _match_info(norm: str, words: list[str]) -> Optional[tuple[str, float]]:
+    """Detect an info query - describe scene or repeat last phrase.
+
+    Uses the same token-set / max-word-count guard as completion so long
+    find/navigate commands can't accidentally match. Returns
+    ``("describe" | "repeat", score)`` or None.
+    """
+    if not words or len(words) > INFO_MAX_WORDS:
+        return None
+
+    describe = process.extractOne(
+        norm, INFO_DESCRIBE_PHRASES, scorer=fuzz.token_set_ratio,
+        score_cutoff=INFO_SCORE_THRESHOLD,
+    )
+    repeat = process.extractOne(
+        norm, INFO_REPEAT_PHRASES, scorer=fuzz.token_set_ratio,
+        score_cutoff=INFO_SCORE_THRESHOLD,
+    )
+    d_score = describe[1] if describe else 0.0
+    r_score = repeat[1] if repeat else 0.0
+    if d_score == 0.0 and r_score == 0.0:
+        return None
+    if d_score >= r_score:
+        return "describe", d_score
+    return "repeat", r_score
 
 
 def _match_completion(norm: str, words: list[str]) -> Optional[tuple[str, float]]:

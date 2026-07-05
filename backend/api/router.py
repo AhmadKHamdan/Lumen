@@ -53,9 +53,76 @@ class Router:
         mtype = payload.get("type")
         if mtype == "user_event":
             await self._handle_user_event(payload)
+        elif mtype == "resume":
+            await self._handle_resume(payload)
+        elif mtype == "motion":
+            # Phone accelerometer state: "still" | "moving" | "walking".
+            # Guides the tracker's spatial debounce behaviour.
+            state = payload.get("state", "still")
+            if state in ("still", "moving", "walking"):
+                self.session.motion_state = state
         else:
             log.info("Session %s: unknown JSON type %r (ignored)",
                      self.session.id, mtype)
+
+    async def _handle_resume(self, payload: dict) -> None:
+        """Restore the task from the previous connection, if it's still in
+        the resume pool. Client sends {type:"resume", id:"<previous id>"}.
+
+        We re-drive the FSM through user_start + command_recognized so the
+        object_allocation detection loop restarts identically to a fresh
+        request, and announce the resumption in voice.
+        """
+        old_id = payload.get("id")
+        if not old_id:
+            return
+        # Local imports to avoid circular deps at module load.
+        from api.session import take_task_for_resume
+        from services import tts_service
+        import time as _time
+
+        self.session.client_session_id = str(old_id)
+        state = take_task_for_resume(str(old_id))
+        if state is None:
+            log.info("Session %s: resume requested for %s but no live state",
+                     self.session.id, old_id)
+            return
+
+        task_type = state["task_type"]
+        target = state["target"]
+        log.info("Session %s: resuming %s task for target=%r",
+                 self.session.id, task_type, target)
+
+        # Announce first (small nicety - user isn't left wondering what happened).
+        resume_phrase = (
+            f"Resuming search for your {target}."
+            if task_type == "object_allocation"
+            else f"Resuming navigation to the {target}."
+        )
+        try:
+            mp3 = tts_service.synthesize(resume_phrase)
+        except Exception:
+            log.exception("Session %s: resume TTS failed", self.session.id)
+        else:
+            await self.session.send_tts(mp3, text=resume_phrase)
+
+        # Drive FSM through IDLE -> LISTENING -> ACTIVE, mirroring the normal
+        # command flow (audio_handler's happy path).
+        self.session.fsm.handle_event("user_start")
+        ctx_key = "target" if task_type == "object_allocation" else "destination"
+        self.session.task_context = {
+            "task_type": task_type,
+            ctx_key: target,
+            "started_at": _time.time(),
+        }
+        ok = self.session.fsm.handle_event(
+            "command_recognized",
+            payload={"task_type": task_type, "target": target},
+        )
+        if not ok:
+            log.warning("Session %s: FSM refused resume transition",
+                        self.session.id)
+            self.session.task_context = {}
 
     async def _handle_user_event(self, payload: dict) -> None:
         event = payload.get("event")
