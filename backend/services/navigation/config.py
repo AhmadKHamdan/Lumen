@@ -73,7 +73,8 @@ HAND_REACH_STEPS = 3  # within this many steps, ask the user to reach out and fe
 # not 2 s of wall clock while nothing was observed). Evidence thresholds
 # (OBST_HITS, NEAR_STREAK, WALK_FRAMES_MIN, the 2-of-3 door rule, sighting minima)
 # stay as consecutive-OBSERVATION counts - those are samples, not durations.
-REPROMPT_SEC = 4.0     # seconds between spoken re-prompts
+REPROMPT_SEC = 6.0     # seconds between spoken re-prompts — long enough to act on
+                       # the previous line first (demo feedback: 4.0 chattered)
 ROOM_SCAN_SEC = 10.0   # seconds for the go_indicator re-confirm before giving up
 # The directed confirmation is a RE-check of evidence the 360 scan already flagged —
 # it doesn't need the scan's own strictness. Fewer hits + a short settle keep the
@@ -120,6 +121,12 @@ NEAR_DOOR_M = 2.0      # last confirmed distance below this = the approach reach
 APPROACH_FRAC = 0.8    # ...or the confirmed door grew to this frame-height fraction
                        # (genuine at-door frames read 0.94-1.0; a door 3 steps away
                        # already fills ~0.75, so 0.5 was trivially satisfied)
+# Third near signal: the door was tracked to nearly filling the frame, then vanished
+# ENTIRELY (no confirmed box, no saturated candidate). At arm's length the panel is
+# wider than the FOV, so total loss after a tracked close approach IS the at-door
+# signature — without this, walking the last step made the detector go blind and the
+# journey degenerated into "I can't find that door anymore" while touching the door.
+CLOSE_GONE_SEC = 1.0   # seconds of total door absence after a close approach = at door
 # The camera itself tells us whether the user MOVED: walking produces sustained
 # frame-to-frame motion (> STILL_MAX), standing still reads near zero. "You're
 # through" additionally requires this many movement frames after reaching the door —
@@ -155,8 +162,14 @@ OBST_NAMES = {"dining table": "table", "potted plant": "plant", "tv": "TV"}  # o
 CORRIDOR_X = (0.30, 0.70)  # central horizontal band = the lane the user walks into
 OBST_BOTTOM_FRAC = 0.62    # box bottom must reach below this (near the floor / close)
 OBST_MIN_H_FRAC = 0.18     # ignore tiny, far boxes
-OBST_MIN_OVERLAP = 0.10    # min lane overlap (fraction of width) to count as "in the way"
-                           # (0.04 let side furniture grazing the lane edge trigger stops)
+OBST_MIN_OVERLAP = 0.30    # min lane overlap, as a fraction of the CORRIDOR's width, to
+                           # count as "in the way". Was 0.10 of the FRAME width, which a
+                           # person's shoulder at the screen edge could satisfy — demo
+                           # feedback: side objects with clear space to pass still spoke
+                           # "in your path". 0.30 of the corridor = a real intrusion.
+OBST_MID_OVERLAP = 0.60    # stricter bar used when the floor layer says the lane IS
+                           # walkable: only an unmistakably mid-path object may override
+                           # the grounded "there's room to pass" verdict.
 OBST_HITS = 3              # consecutive frames before the FIRST alert (kills flicker)
 OBST_CLEAR_HITS = 2        # consecutive clear frames before declaring the path clear
 OBST_REPROMPT_SEC = 3.0    # seconds between repeated warnings while still blocked

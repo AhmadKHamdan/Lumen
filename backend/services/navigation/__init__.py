@@ -99,12 +99,10 @@ def preload_in_background() -> None:
                 "You're right at the door. Reach out with your hand, open it, "
                 "walk through the doorway, and take two or three steps into the room.",
                 "You're through. Now slowly turn to your right, all the way "
-                "around, until you are facing where you started, so I can scan "
-                "this room.",
+                "around, so I can scan this room.",
             ] + [
                 f"Looking for the {g}. Let's scan the room — slowly turn to "
-                "your right, all the way around, until you are facing where "
-                "you started."
+                "your right, all the way around."
                 for g in GOAL_INDICATORS
             ]
             for phrase in fixed:

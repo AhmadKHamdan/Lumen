@@ -13,12 +13,15 @@ Priority is absolute: a confirmed indicator always beats a door.
 """
 from __future__ import annotations
 
+import logging
 from collections import Counter
 
 from .config import *  # noqa: F401,F403 — all tuning constants, referenced unqualified
 from .goals import _article, _display, arrival_phrase, evaluate_arrival
 from .geometry import (_cluster_bearings, _cluster_doors, _direction, _signed_from_ref,
                        _signed_from_ref_deg, _track_turn, _turn_to)
+
+log = logging.getLogger("lumen.nav.controller")
 
 
 # --- spoken phrasing -------------------------------------------------------------
@@ -43,19 +46,15 @@ def _door_locate_phrase(region: str, dist_m: float | None) -> str:
 
 
 def _door_go_phrase(dist_m: float | None) -> str:
-    """HOW to get there: walking instruction + the tactile hand cue. Spoken only
-    AFTER the path check comes back clear (or after an obstacle clears)."""
-    if dist_m is None:
-        return "Walk forward slowly, and reach out with your hand to find the door."
-    steps = max(1, round(dist_m / STEP_LENGTH_M))
-    if dist_m < 1.0:
+    """HOW to get there: walking instruction + the tactile hand cue. Always spoken
+    right after a line that already named the door's distance (the call-out or the
+    post-obstacle re-orientation), so it deliberately names NO step count — demo
+    feedback: hearing the number twice in a row ("about 4 steps ahead ... walk
+    about 4 steps") read as chatter, and two DIFFERENT numbers as a contradiction."""
+    if dist_m is not None and dist_m < 1.0:
         return "Reach out with your hand to find it."
-    if steps <= HAND_REACH_STEPS:
-        return (f"Walk about {steps} {_steps_word(steps)}, and reach out with "
-                "your hand to find it.")
-    remaining = steps - HAND_REACH_STEPS
-    return (f"Walk forward, and after about {remaining} {_steps_word(remaining)} "
-            "reach out with your hand.")
+    return ("Walk forward slowly, with your hand out in front of you "
+            "until you feel the door.")
 
 
 def _door_phrase(region: str, dist_m: float | None) -> str:
@@ -229,8 +228,8 @@ def _finish_discover(st, goal: str, indicator_ok: bool, confirm_start: bool = Fa
         body = "I couldn't find anything useful in this room. "
     else:  # something was sighted (e.g. a lone fridge glimpse) but no flag was earned
         body = summary.removeprefix("Scan complete. ").rstrip(".") + " — but nothing I can act on yet. "
-    return (lead + body + "Let's scan one more time — slowly turn to your right, all "
-            "the way around, until you are facing where you started."), True
+    return (lead + body + "Let's scan one more time — slowly turn to your right, "
+            "all the way around."), True
 
 
 # --- per-frame entry points the navigation engine calls -------------------------
@@ -288,12 +287,26 @@ def detect_transit(st, near_box: bool, door_confirmed: bool, cur_frac: float,
             just_near = True  # gently repeat the at-the-door instruction
         return transit
 
+    # Third near signal: a tracked CLOSE approach (door grew to APPROACH_FRAC),
+    # then the door vanished entirely — no confirmed box, no saturated candidate.
+    # At arm's length the panel is wider than the FOV, so the detector going
+    # blind right after a close approach means "at the door", not "door lost".
+    # Only used to ARM the latch: once armed, absence must feed the transit
+    # ("gone") timer instead, or walking through would never be inferred.
+    if (st["mode"] == "go_door" and not door_confirmed and not near_box
+            and st["approach_frac"] >= APPROACH_FRAC):
+        st["close_gone"] += dt
+    else:
+        st["close_gone"] = 0.0
+    lost_at_door = (not st["near_latch"] and st["close_gone"] >= CLOSE_GONE_SEC)
+
     # At-door can only ARM: (a) on NEAR_STREAK consecutive qualifying frames — a
     # single spiky loose box mid-sidestep once spoke "you're at the door" from 2 m —
     # and (b) never while an obstacle episode is open: the episode must finish with
     # its "way is clear + door re-orientation" line first, or the spoken order
     # contradicts itself ("you're at the door" ... "the door is 4 steps ahead").
-    near_now = (door_confirmed and cur_frac >= DOOR_FILL_FRAC) or at_door_box
+    near_now = ((door_confirmed and cur_frac >= DOOR_FILL_FRAC) or at_door_box
+                or lost_at_door)
     can_arm = st["near_latch"] or (not st["obst_active"]
                                        and st["near_streak"] + 1 >= NEAR_STREAK)
     if st["mode"] != "go_door":
@@ -362,8 +375,8 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
         # one merged line, because two priority lines would cut each other off.
         st["rooms_visited"] += 1
         over = st["rooms_visited"] - ROOM_CAP
-        scan_cmd = ("Now slowly turn to your right, all the way around, until "
-                    "you are facing where you started, so I can scan this room.")
+        scan_cmd = ("Now slowly turn to your right, all the way around, "
+                    "so I can scan this room.")
         if over >= 0 and over % ROOM_CAP_REMIND == 0:
             guidance = (f"You're through — that's {st['rooms_visited']} rooms now "
                         f"and no {goal} yet. Say stop anytime if you'd like to "
@@ -377,6 +390,10 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
             # Fallback (no compass, e.g. a laptop): one slow steady-capture pass.
             if st["last_heading"] is None:
                 st["last_heading"] = 0.0  # mark started
+                log.info("Discover scan started WITHOUT compass — fallback "
+                         "steady-capture pass (%.0fs of steady frames; no 360 "
+                         "tracking). Check the phone sent 'heading' messages.",
+                         FALLBACK_SCAN_SEC)
                 if st["skip_scan_prompt"]:
                     st["skip_scan_prompt"] = False  # instruction already in the rescan line
                 else:
@@ -396,12 +413,13 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
             # First sensor reading -> set the START direction (our anchor) and begin.
             st["ref_heading"] = heading
             st["last_heading"] = heading
+            log.info("Discover scan started with compass (start heading %.1f deg)",
+                     heading)
             if st["skip_scan_prompt"]:
                 st["skip_scan_prompt"] = False  # instruction already spoken with the rescan line
             else:
-                guidance = (f"Looking for the {goal}. Let's scan the room — slowly turn "
-                            "to your right, all the way around, until you are facing "
-                            "where you started.")
+                guidance = (f"Looking for the {goal}. Let's scan the room — slowly "
+                            "turn to your right, all the way around.")
                 priority = True
         else:
             _track_turn(st, heading)  # advance the full-circle total (non-blurred frame)
@@ -484,9 +502,8 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
                 else:
                     st.enter_discover()
                     st["skip_scan_prompt"] = True
-                    guidance = (f"I couldn't confirm the {goal}. Let's scan the room again — "
-                                "slowly turn to your right, all the way around, until you "
-                                "are facing where you started.")
+                    guidance = (f"I couldn't confirm the {goal}. Let's scan the room "
+                                "again — slowly turn to your right, all the way around.")
                 priority = True
 
     elif st["mode"] == "face_target":
@@ -547,12 +564,16 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
             if obst_guidance and not obst_blocking:
                 # The path just cleared and the user side-stepped — re-orient them in
                 # the SAME utterance if the door is in sight (two back-to-back priority
-                # lines would cut each other off), else re-arm the one-shot call-out.
+                # lines would cut each other off). If the door is NOT in sight this
+                # frame, only flag a re-orientation for when it reappears — never
+                # re-arm the call-out + path check: the watchdog JUST verified the
+                # path clear, so "let me check the path ahead" again is noise.
                 if door_confirmed and region:
                     guidance = obst_guidance + " " + _door_phrase(region, door_dist)
                     st["door_announced"] = True
+                    st["reorient"] = False
                 else:
-                    st["door_announced"] = False
+                    st["reorient"] = True
         elif just_near:
             # The whole door sequence in ONE utterance — network latency between
             # separate commands would leave the user waiting at the door.
@@ -576,6 +597,12 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
                 priority = True  # one-shot: must actually be spoken, never swallowed
                 st["obst_hold"] = OBST_HOLDOFF_SEC
                 st["path_checked"] = False
+            elif st["reorient"]:
+                # Door back in sight after an obstacle episode that ended without
+                # it. The path was verified clear moments ago — just re-orient.
+                st["reorient"] = False
+                guidance = _door_phrase(region, door_dist)
+                priority = True
             elif not st["path_checked"] and st["obst_hold"] <= 0:
                 # Hold expired with no obstacle warning -> the clear verdict + how to walk.
                 st["path_checked"] = True
@@ -588,9 +615,8 @@ def step(st, *, goal, heading, motion, w, seen, indicators, obj_dets, door_confi
             if st["scan_age"] >= DOOR_LOST_SEC:
                 st.enter_discover()
                 st["skip_scan_prompt"] = True
-                guidance = ("I can't find that door anymore. Let's scan the room again — "
-                            "slowly turn to your right, all the way around, until you "
-                            "are facing where you started.")
+                guidance = ("I can't find that door anymore. Let's scan the room "
+                            "again — slowly turn to your right, all the way around.")
                 priority = True
             else:
                 if st["phase_age"] == 0:

@@ -4,28 +4,24 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0d1117" />
+    <!-- Home-screen "web app" mode: launched from the icon, the page runs
+         fullscreen with no URL bar. Add via the browser's share sheet ->
+         "Add to Home Screen"; the plain browser tab always keeps its bar. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Lumen" />
+    <link rel="manifest" href="manifest.json" />
     <title>Lumen</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="app">
-      <header class="header">
+      <header class="header" aria-live="polite">
+        <span id="conn-indicator" class="status-pill conn-disconnected">disconnected</span>
         <h1 class="title">Lumen</h1>
-        <p class="subtitle">Task-oriented assistive system</p>
+        <span id="state-indicator" class="status-pill state-idle">idle</span>
       </header>
-
-      <section class="status" aria-live="polite">
-        <div class="status-row">
-          <span class="status-label">Connection</span>
-          <span id="conn-indicator" class="status-pill conn-disconnected">disconnected</span>
-        </div>
-        <div class="status-row">
-          <span class="status-label">State</span>
-          <span id="state-indicator" class="status-pill state-idle">idle</span>
-        </div>
-        <p id="last-transcription" class="transcription" aria-live="polite"></p>
-        <p id="last-error" class="error-msg" role="alert"></p>
-      </section>
 
       <section class="controls">
         <div class="primary-controls">
@@ -44,15 +40,8 @@
         </button>
       </section>
 
-      <video id="video-preview" class="video-preview" autoplay muted playsinline></video>
-
-      <footer class="footer">
-        <p>
-          Press Start, then tap and hold anywhere on the screen while you speak.
-          Try <em>"find my cup"</em>, <em>"navigate to the kitchen"</em>,
-          <em>"what's in front of me"</em>, or <em>"repeat that"</em>.
-        </p>
-      </footer>
+      <video id="video-preview" class="video-preview" autoplay muted playsinline
+             aria-hidden="true"></video>
     </main>
 
     <script type="module" src="js/app.js"></script>

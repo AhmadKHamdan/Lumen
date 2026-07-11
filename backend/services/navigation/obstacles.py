@@ -23,8 +23,8 @@ from .config import (CORRIDOR_X, DEPTH_AREA_FRAC, DEPTH_FAR_ROWS, DEPTH_FLAT_MIN
                      DEPTH_INPUT_W, DEPTH_LANE_ROWS, DEPTH_LANE_X, DEPTH_NEAR_ROWS,
                      DEPTH_REL_MARGIN, DOOR_DEBUG, FLOOR_LANE_ROWS, FLOOR_LANE_X,
                      FLOOR_MIN_COVER, OBST_BOTTOM_FRAC, OBST_CLEAR_HITS, OBST_HITS,
-                     OBST_MIN_H_FRAC, OBST_MIN_OVERLAP, OBST_NAMES, OBST_REPROMPT_SEC,
-                     OBST_SIGNAL)
+                     OBST_MID_OVERLAP, OBST_MIN_H_FRAC, OBST_MIN_OVERLAP, OBST_NAMES,
+                     OBST_REPROMPT_SEC, OBST_SIGNAL)
 from . import models
 
 log = logging.getLogger("lumen.nav.obstacles")
@@ -110,17 +110,21 @@ def _floor_tripwire(img):
     return "left" if lcov >= rcov else "right"
 
 
-def _obstacle_in_corridor(obstacle_dets, w: int, h: int):
+def _obstacle_in_corridor(obstacle_dets, w: int, h: int, min_overlap: float = OBST_MIN_OVERLAP):
     """Most intrusive known obstacle standing in the walking lane, or None.
     The lane is the lower-centre band of the frame (the strip the user walks into).
-    Returns (class_name, center_x_frac) of the worst offender."""
+    Overlap is measured as a fraction of the CORRIDOR's width — how much of the
+    lane the box eats — not of the frame, so a wide box grazing the lane edge (a
+    person's shoulder at the side of the screen) scores low and a mid-path blocker
+    scores high. Returns (class_name, center_x_frac) of the worst offender."""
     lo, hi = CORRIDOR_X
+    corridor_w = (hi - lo) * w
     best = None
     for cls, _conf, (x1, y1, x2, y2) in obstacle_dets:
         if (y2 - y1) / h < OBST_MIN_H_FRAC or y2 / h < OBST_BOTTOM_FRAC:
             continue  # too small/far, or sitting high (not on the floor ahead)
-        overlap = max(0.0, min(x2, hi * w) - max(x1, lo * w)) / w
-        if overlap < OBST_MIN_OVERLAP:
+        overlap = max(0.0, min(x2, hi * w) - max(x1, lo * w)) / corridor_w
+        if overlap < min_overlap:
             continue  # off to the side -> the user won't walk into it
         score = overlap * ((y2 - y1) / h)  # more lane coverage + taller (closer) = worse
         if best is None or score > best[0]:
@@ -128,14 +132,22 @@ def _obstacle_in_corridor(obstacle_dets, w: int, h: int):
     return None if best is None else (best[1], best[2])
 
 
-def _obstacle_watchdog(st, obstacle_dets, unnamed_side, w: int, h: int, dt: float):
+def _obstacle_watchdog(st, obstacle_dets, unnamed_side, w: int, h: int, dt: float,
+                       floor_clear: bool = False):
     """Debounced corridor watchdog fusing two layers: the YOLO class layer (names the
     object) and the class-agnostic unnamed signal (floor or depth — precomputed by
     the caller as a step-aside side, or None). Returns (guidance, priority, blocking).
     blocking=True means a confirmed obstacle is in the lane now, so the caller
     suppresses door guidance. Speaks on first confirm, again every OBST_REPROMPT_SEC
-    frames while still blocked, and once when the path clears."""
-    yolo = _obstacle_in_corridor(obstacle_dets, w, h)   # (cls, cx) or None
+    frames while still blocked, and once when the path clears.
+
+    ``floor_clear=True`` means the grounded floor layer positively verified the lane
+    is walkable this frame — there IS room to pass. The named layer then needs a much
+    larger lane intrusion to overrule it (a person half in-frame must not outvote
+    visible free floor), but keeps its full sensitivity for waist-height obstacles
+    the floor check can't see when the floor layer is off or unavailable."""
+    min_overlap = OBST_MID_OVERLAP if floor_clear else OBST_MIN_OVERLAP
+    yolo = _obstacle_in_corridor(obstacle_dets, w, h, min_overlap)   # (cls, cx) or None
     if yolo is not None:
         cls, cx = yolo
         name = OBST_NAMES.get(cls, cls)
@@ -185,13 +197,18 @@ def evaluate(st, obstacle_dets, img, w: int, h: int, dt: float):
         if not st["near_latch"]:
             # Approach: both layers. The class-agnostic unnamed signal per OBST_SIGNAL
             # ("off" or a model that failed to load -> None -> YOLO only).
+            floor_clear = False
             if OBST_SIGNAL == "floor":
                 unnamed_side = _floor_tripwire(img)
+                # None from a LOADED floor model = the lane was positively
+                # verified walkable (vs None because the model is unavailable).
+                floor_clear = unnamed_side is None and models._seg_infer is not None
             elif OBST_SIGNAL == "depth":
                 unnamed_side = _depth_tripwire(_depth_map(img))
             else:
                 unnamed_side = None
-            return _obstacle_watchdog(st, obstacle_dets, unnamed_side, w, h, dt)
+            return _obstacle_watchdog(st, obstacle_dets, unnamed_side, w, h, dt,
+                                      floor_clear=floor_clear)
         # AT/THROUGH the door: the panel fills the frame, so the floor/depth signal
         # is meaningless here and pauses — but a PERSON stepping into the doorway is
         # still a named YOLO box. The named layer stays armed through the transit.

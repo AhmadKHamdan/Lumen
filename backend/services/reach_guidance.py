@@ -101,6 +101,16 @@ def assess_reach(
     return ReachInfo("approach", direction, dxf, dyf)
 
 
+def grab_phrase(target: str) -> str:
+    """Spoken cue once the hand has HOVERED near the target through a full
+    re-affirm window. The 2D touch test can't see depth — a fingertip reaching
+    past or beside the object may never enter the box — so instead of looping
+    "reach forward" forever, hand the final action to the user."""
+    target = target or "object"
+    return (f"Your hand is right next to the {target}. Reach a little further "
+            "and try to pick it up. Say got it when you have it.")
+
+
 def reach_phrase(target: str, info: ReachInfo) -> str:
     """Compose the spoken cue for the current :class:`ReachInfo`."""
     target = target or "object"

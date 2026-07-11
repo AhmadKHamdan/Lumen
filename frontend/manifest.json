@@ -1,0 +1,10 @@
+{
+  "name": "Lumen",
+  "short_name": "Lumen",
+  "description": "Assistive vision app: find objects, navigate rooms, reach and grasp.",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": ".",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117"
+}

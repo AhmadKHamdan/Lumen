@@ -61,8 +61,7 @@ const btnPTT = document.getElementById("btn-ptt");
 const videoEl = document.getElementById("video-preview");
 const connIndicator = document.getElementById("conn-indicator");
 const stateIndicator = document.getElementById("state-indicator");
-const lastTranscription = document.getElementById("last-transcription");
-const lastError = document.getElementById("last-error");
+
 
 // ---------- module instances ----------
 
@@ -133,21 +132,14 @@ ws.on("fsm_state", (msg) => {
 });
 
 ws.on("transcription", (msg) => {
-  const text = msg.text || "";
-  const conf = msg.confidence != null ? Math.round(msg.confidence * 100) : null;
-  console.log("transcript:", text, "conf:", conf);
-  lastTranscription.textContent = text
-    ? (conf != null ? `"${text}" (${conf}% confidence)` : `"${text}"`)
-    : "";
-  lastError.textContent = "";  // clear any prior error
+  // Voice-first UI: no on-screen readback. The console keeps it for debugging.
+  console.log("transcript:", msg.text || "", "conf:", msg.confidence);
 });
 
 ws.on("error", (msg) => {
+  // Voice-first UI: server errors are spoken via the follow-up gTTS clip,
+  // never rendered as text. Console keeps them for debugging.
   console.warn("server error:", msg);
-  lastError.textContent = msg.message || "Server error.";
-  // No local speech here. The server follows most user-facing errors with a
-  // gTTS clip; layering browser TTS on top produced the "two voices"
-  // double-up. Errors that don't get a gTTS clip are visual-only.
 });
 
 ws.onBinary(TAG_TTS, (bytes) => {
@@ -191,8 +183,6 @@ media.onAudioBlob(async (audioBlob) => {
 
 btnStart.addEventListener("click", async () => {
   if (active) return;
-  lastError.textContent = "";
-  lastTranscription.textContent = "";
 
   // Unlock audio output for the page WHILE STILL INSIDE THE CLICK GESTURE.
   // Mobile browsers (iOS Safari, Android Chrome) silently reject .play()
@@ -201,6 +191,18 @@ btnStart.addEventListener("click", async () => {
   // Priming here, before any await, registers our intent to play audio.
   audioQueue.prime();
 
+  // Start the motion + compass monitors NOW, before any await: iOS 13+ only
+  // honours DeviceMotion/OrientationEvent.requestPermission() inside the
+  // user-gesture call stack, and the awaits below (camera permission flow in
+  // media.start especially) let that transient activation expire — which
+  // silently killed the compass and forced the nav scan onto its
+  // compass-less fallback. Calling the async starters un-awaited still
+  // executes requestPermission() synchronously within the gesture.
+  // Fire-and-forget; failure just means the server won't see motion/heading
+  // updates and navigation falls back to a compass-less single pass.
+  motion.start().catch((e) => console.warn("motion.start failed", e));
+  heading.start().catch((e) => console.warn("heading.start failed", e));
+
   try {
     await media.start();
   } catch (e) {
@@ -208,20 +210,12 @@ btnStart.addEventListener("click", async () => {
     const errText = e.message === "camera-permission-denied"
       ? "Camera or microphone permission denied. Please reload and allow access."
       : "Could not start the camera or microphone.";
-    lastError.textContent = errText;
     // Server can't TTS this - the WS isn't even open yet. Speak locally.
     speakLocally(errText);
     return;
   }
 
   await wakeLock.acquire();
-  // Start the device-motion monitor from inside the gesture - iOS 13+
-  // requires that for permission. Fire-and-forget; failure just means the
-  // server won't see motion updates and falls back to plain debouncing.
-  motion.start().catch((e) => console.warn("motion.start failed", e));
-  // Compass heading, same gesture requirement on iOS. Failure is fine - the
-  // navigation scan falls back to a compass-less single pass.
-  heading.start().catch((e) => console.warn("heading.start failed", e));
   ws.connect();
 
   // Wait briefly for the WebSocket to open before sending start.

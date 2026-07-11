@@ -59,19 +59,29 @@ TEMPORAL_MIN_HITS = 3           # ... and require this many to "confirm" the tar
 
 CONF_THRESHOLD = 0.35           # YOLO confidence floor for this task
 
-GUIDANCE_REAFFIRM_SEC = 6.0     # re-speak unchanged guidance at most this often
+GUIDANCE_REAFFIRM_SEC = 9.0     # re-speak unchanged guidance at most this often
 SCAN_PROMPT_INTERVAL_SEC = 8.0  # cadence of "turn around" prompts while unseen
 TASK_TIMEOUT_SEC = 60.0         # give up if never seen within this many seconds
+
+# Even when the (region, distance) bucket CHANGES, wait at least this long
+# since the last spoken line. Without it, a target sitting on a bucket
+# boundary alternated "to your right" / "to your left" line after line —
+# for a blind user each spoken cue triggers a movement, so cues must arrive
+# slowly enough to act on.
+MIN_SPEAK_GAP_SEC = 3.0
 
 # Debounce spatial changes so YOLO's frame-to-frame box jitter around a
 # bucket boundary doesn't cause "medium -> near -> medium -> ..." spam.
 # We require the same (region, distance) for this many consecutive frames
-# before switching the "official" bucket. 2 frames ~= 400 ms at 5 FPS.
-SPATIAL_STREAK_TO_ACCEPT = 2
+# before switching the "official" bucket. 3 frames ~= 600 ms at 5 FPS.
+SPATIAL_STREAK_TO_ACCEPT = 3
 
 # Reach mode (Sprint 5: hand guidance, only fires when target is near AND a
 # hand is detected).
-REACH_REAFFIRM_SEC = 5.0
+REACH_REAFFIRM_SEC = 6.0
+# Minimum gap between reach cues even when the direction changes (see
+# MIN_SPEAK_GAP_SEC — same rationale, shorter because reach cues are short).
+REACH_MIN_GAP_SEC = 2.5
 
 # Once reach mode has spoken, don't fall back to body-direction guidance
 # until the hand has been absent for this long. Handles the case where
@@ -124,6 +134,11 @@ class GuidanceTracker:
         # tuple of the most recently spoken reach cue, used for throttling.
         self.last_reach_key: Optional[tuple[str, str]] = None
         self.last_reach_at = 0.0
+        # Consecutive "almost" cues spoken without leaving the almost state.
+        # From the second one on, the cue escalates to "try to pick it up" —
+        # the 2D touch test can miss a real grab (depth), so we must not loop
+        # "reach forward" forever.
+        self._almost_cues = 0
 
         # Spatial debouncing (Sprint 5 refinement). YOLO's box size flickers
         # frame-to-frame near bucket boundaries; we require SPATIAL_STREAK_TO_ACCEPT
@@ -229,7 +244,11 @@ class GuidanceTracker:
             # Otherwise: standard direction + distance guidance.
             key = (self.last_region, self.last_distance)
             stale = (now - self.last_spoken_at) >= self.reaffirm_sec
-            if key != self.last_spoken_key or stale:
+            # A changed bucket still waits out a minimum gap since the last
+            # line (first sighting is exempt) — no left/right machine-gunning.
+            gap_ok = (self.last_spoken_key is None
+                      or (now - self.last_spoken_at) >= MIN_SPEAK_GAP_SEC)
+            if (key != self.last_spoken_key and gap_ok) or stale:
                 first = self.last_spoken_key is None
                 phrase = (
                     guidance_generator.first_seen_phrase(self.target, effective_info)
@@ -293,7 +312,11 @@ class GuidanceTracker:
 
         key = (reach.state, reach.direction)
         stale = (now - self.last_reach_at) >= REACH_REAFFIRM_SEC
-        if key != self.last_reach_key or stale:
+        # Direction flips (left -> right -> left on a wavering hand) must not
+        # machine-gun the user: even a CHANGED cue waits out a minimum gap.
+        gap_ok = (self.last_reach_key is None
+                  or (now - self.last_reach_at) >= REACH_MIN_GAP_SEC)
+        if (key != self.last_reach_key and gap_ok) or stale:
             # Transition INTO "almost" gets a short haptic pulse - a
             # non-audio cue that the user is on target and just needs to
             # push forward. Directional changes stay purely voice.
@@ -303,8 +326,17 @@ class GuidanceTracker:
             )
             if entered_almost:
                 self.pending_haptic = "short"
+                self._almost_cues = 0
             self.last_reach_key = key
             self.last_reach_at = now
+            if reach.state == "almost":
+                self._almost_cues += 1
+                if self._almost_cues >= 2:
+                    # Hovered near the target through a whole re-affirm window:
+                    # stop repeating "reach forward" and prompt the grab.
+                    return ("reach", reach_guidance.grab_phrase(self.target))
+            else:
+                self._almost_cues = 0
             return ("reach", reach_guidance.reach_phrase(self.target, reach))
         return None
 

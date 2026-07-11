@@ -125,7 +125,42 @@ export class AudioQueue {
     this._playing = false;
   }
 
-  _playOne(bytes) {
+  async _playOne(bytes) {
+    // Prefer Web Audio (decode -> BufferSource -> destination). While the mic
+    // is live, iOS runs a play-and-record audio session and HTMLAudio clips
+    // played back-to-back through one element came out progressively QUIETER
+    // (ducking that never released), then reset — demo feedback: "first
+    // sentence full voice, then lower, then lower, then loud again". Web Audio
+    // output bypasses that per-element ducking and always plays at full gain.
+    // The context was already unlocked inside the Start gesture by prime().
+    if (this._audioCtx) {
+      try {
+        if (this._audioCtx.state === "suspended" && this._audioCtx.resume) {
+          await this._audioCtx.resume().catch(() => {});
+        }
+        // Copy the bytes: decodeAudioData detaches the buffer it's given.
+        const buf = bytes.buffer.slice(bytes.byteOffset,
+                                       bytes.byteOffset + bytes.byteLength);
+        const decoded = await this._audioCtx.decodeAudioData(buf);
+        await new Promise((resolve) => {
+          const src = this._audioCtx.createBufferSource();
+          src.buffer = decoded;
+          const gain = this._audioCtx.createGain();
+          gain.gain.value = 1.0;   // pinned: every clip at full volume
+          src.connect(gain);
+          gain.connect(this._audioCtx.destination);
+          src.onended = resolve;
+          src.start(0);
+        });
+        return;
+      } catch (e) {
+        console.warn("Web Audio playback failed, falling back to HTMLAudio", e);
+      }
+    }
+    return this._playOneHtml(bytes);
+  }
+
+  _playOneHtml(bytes) {
     return new Promise((resolve) => {
       const blob = new Blob([bytes], { type: "audio/mpeg" });
       const url = URL.createObjectURL(blob);
@@ -133,6 +168,7 @@ export class AudioQueue {
       // Prefer the gesture-primed persistent element. On iOS, falling back
       // to a fresh `new Audio()` here is exactly what was silently failing.
       const audio = this._element || new Audio();
+      try { audio.volume = 1.0; } catch (_) {}  // re-pin: never inherit a ducked level
 
       const cleanup = () => {
         URL.revokeObjectURL(url);

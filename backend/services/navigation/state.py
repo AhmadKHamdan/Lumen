@@ -63,9 +63,10 @@ def _initial_fields() -> dict[str, Any]:
             "door_bearings": [], "ind_bearings": [],
             "target_heading": None, "target_kind": None,
             "skip_scan_prompt": False, "last_door_dist": None,
-            "approach_frac": 0.0, "near_age": 0,
+            "approach_frac": 0.0, "near_age": 0, "close_gone": 0.0,
             "obst_hits": 0, "obst_clear": 0, "obst_cool": 0, "obst_active": False,
-            "fast_frames": 0, "door_announced": False, "confirm_settle": 0,
+            "fast_frames": 0, "door_announced": False, "reorient": False,
+            "confirm_settle": 0,
             "obst_hold": 0, "path_checked": True, "walk_frames": 0, "near_streak": 0}
 
 
@@ -141,9 +142,11 @@ class NavState:
         d["obst_cool"] = 0
         d["obst_active"] = False
         d["door_announced"] = False  # the ONE static door call-out for this approach
+        d["reorient"] = False        # pending post-obstacle re-orientation
         d["obst_hold"] = 0           # obstacle-speech holdoff while the call-out plays
         d["path_checked"] = True     # armed (set False) by the call-out itself
         d["walk_frames"] = 0         # camera-motion frames = evidence the user MOVED
         d["near_streak"] = 0         # consecutive at-door frames (spike immunity)
         d["near_latch"] = False      # fresh approach = fresh latch
         d["gone"] = 0
+        d["close_gone"] = 0.0        # tracked-close-then-vanished at-door signal

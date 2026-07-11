@@ -68,11 +68,12 @@ def test_same_position_within_window_does_not_repeat():
 def test_position_change_triggers_new_guidance():
     tracker = GuidanceTracker("cup")
     _confirm(tracker, t0=100.0)
-    # Spatial debounce requires 2 consecutive frames of the new bucket before
-    # switching, so the first LEFT frame is a no-op and the second is what
-    # actually triggers the new phrase.
-    assert tracker.update([LEFT_FAR], SHAPE, 100.6) is None
-    res = tracker.update([LEFT_FAR], SHAPE, 100.8)
+    # Spatial debounce requires 3 consecutive frames of the new bucket before
+    # switching, and even a changed bucket waits out MIN_SPEAK_GAP_SEC (3s)
+    # since the last spoken line — cues must arrive slowly enough to act on.
+    assert tracker.update([LEFT_FAR], SHAPE, 103.0) is None
+    assert tracker.update([LEFT_FAR], SHAPE, 103.2) is None
+    res = tracker.update([LEFT_FAR], SHAPE, 103.4)
     assert res is not None
     action, phrase = res
     assert action == "guide"
@@ -83,8 +84,8 @@ def test_position_change_triggers_new_guidance():
 def test_reaffirm_after_interval_even_if_unchanged():
     tracker = GuidanceTracker("cup")
     _confirm(tracker, t0=100.0)            # last guide at t=100.4
-    # Same bucket but past the 6s reaffirm window -> speak again.
-    res = tracker.update([CENTER_NEAR], SHAPE, 100.4 + 6.0)
+    # Same bucket but past the 9s reaffirm window -> speak again.
+    res = tracker.update([CENTER_NEAR], SHAPE, 100.4 + 9.0)
     assert res is not None and res[0] == "guide"
 
 
@@ -208,10 +209,35 @@ def test_reach_phrase_changes_with_direction():
     res2 = tracker.update([CENTER_NEAR], SHAPE, 100.8, hand_pose=hand_right)
     assert res2 is None
 
-    # Hand moves to the LEFT of target -> direction flips -> new cue.
+    # Hand moves to the LEFT of target -> direction flips, but the minimum
+    # gap between reach cues (REACH_MIN_GAP_SEC = 2.5s) hasn't passed yet,
+    # so the flip is held back — no left/right machine-gunning.
     hand_left = _hand((120, 240))
     res3 = tracker.update([CENTER_NEAR], SHAPE, 101.0, hand_pose=hand_left)
-    assert res3 is not None and "to the right" in res3[1].lower()
+    assert res3 is None
+
+    # Once the gap has passed, the flipped direction is spoken.
+    res4 = tracker.update([CENTER_NEAR], SHAPE, 103.2, hand_pose=hand_left)
+    assert res4 is not None and "to the right" in res4[1].lower()
+
+
+def test_reach_escalates_to_grab_after_hovering_almost():
+    """Hovering in the 'almost' zone through a full re-affirm window must
+    escalate to a grab prompt — the 2D touch test can't see depth, so looping
+    'reach forward' forever would strand the user."""
+    tracker = GuidanceTracker("cup")
+    # Small box so a fingertip can be OUTSIDE it yet within the almost zone.
+    small = Detection("cup", 0.9, (300, 220, 340, 260))   # centroid (320, 240)
+    hand = _hand((280, 240))   # left of the box, 40 px from centroid -> almost
+    r1 = tracker._update_reach(small, hand, 640, 480, 100.0)
+    assert r1 is not None and r1[0] == "reach"
+    assert "reach forward" in r1[1].lower()
+    # Unchanged cue within the re-affirm window -> quiet.
+    assert tracker._update_reach(small, hand, 640, 480, 102.0) is None
+    # Still 'almost' after the window -> grab prompt, not another repeat.
+    r2 = tracker._update_reach(small, hand, 640, 480, 106.5)
+    assert r2 is not None and r2[0] == "reach"
+    assert "pick it up" in r2[1].lower()
 
 
 def test_touch_emits_touch_action_and_names_target():

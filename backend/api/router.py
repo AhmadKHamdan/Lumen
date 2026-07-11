@@ -66,6 +66,11 @@ class Router:
             # navigation task's 360 room scan and bearing math.
             deg = payload.get("degrees")
             if isinstance(deg, (int, float)) and 0.0 <= float(deg) < 360.0:
+                if self.session.heading is None:
+                    # First reading of the connection: make compass availability
+                    # visible in the logs (its absence is a silent fallback).
+                    log.info("Session %s: compass heading online (first reading: "
+                             "%.1f deg)", self.session.id, float(deg))
                 self.session.heading = float(deg)
         else:
             log.info("Session %s: unknown JSON type %r (ignored)",
