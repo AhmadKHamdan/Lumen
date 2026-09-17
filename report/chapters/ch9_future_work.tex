@@ -1,0 +1,113 @@
+% =========================
+% Chapter 9
+% =========================
+\chapter{Future Work}
+\label{ch:future_work}
+
+The limitations of Chapter~\ref{ch:limitations} map directly onto a staged plan.
+The items below are ordered roughly by leverage: each earlier item either unblocks
+or de-risks the ones after it.
+
+\section{Deepening the Human-in-the-Loop Navigation Design}
+\label{sec:fw_hints}
+
+The exploration design casts the user as a \emph{direction oracle}, and the core
+of that interaction is now live: at a multi-door fork the system announces the
+doors, asks, follows a spoken ``left''/``right''/``ahead''/``behind'', and falls
+back to the door nearest straight ahead when the user does not know
+(Section~\ref{sec:multi_door}). The next milestones deepen it:
+
+\begin{itemize}[nosep]
+  \item \textbf{Hints in the initial command.} Accept a direction embedded in the
+        task utterance itself (``the kitchen is to the left''), so the very first
+        scan can already be biased before any fork is reached. The parser's
+        direction vocabulary and the bearing mathematics are shared with the fork
+        dialogue; what is missing is carrying the hint into the task context.
+  \item \textbf{Richer door references.} Beyond four coarse directions: ordinal
+        and comparative references (``the second door on the right'', ``the far
+        one''), and a spoken correction channel after guidance has started
+        (``not that one'').
+  \item \textbf{Come-from-door exclusion.} After a doorway transit, the entry
+        door sits roughly $180^\circ$ from the entry heading, which the compass
+        provides nearly for free. Deprioritizing (not banning) it eliminates the
+        two-room ping-pong that is currently the main failure mode of longer
+        journeys --- and removes the most common reason the fork question has to
+        be asked at all.
+\end{itemize}
+
+\section{Exploration Memory and Bounded Autonomy}
+\label{sec:fw_memory}
+
+Beyond hints lies coarse memory --- deliberately heuristic, never a map:
+
+\begin{itemize}[nosep]
+  \item \textbf{Tried-door memory and backtracking.} Bucket each door as
+        unvisited, entry, or exhausted; prefer unvisited, backtrack through the
+        entry door at dead ends, and avoid exhausted branches --- depth-first
+        search over an unknown room graph, with a breadcrumb stack of entry
+        headings enabling multi-level backtracking. The compass prerequisite is
+        already wired.
+  \item \textbf{Room cap with a graceful hand-off.} Bound how far exploration
+        can wander: after a configured number of rooms, do not quit silently ---
+        let the user decide: ``I'm having trouble finding the kitchen. Do you
+        want to stop, or keep going?'' The user's ``stop'' is already honored
+        globally; the cap makes the check-in proactive.
+\end{itemize}
+
+\section{Perception Robustness}
+\label{sec:fw_perception}
+
+\begin{itemize}[nosep]
+  \item \textbf{Hard-negative fine-tuning.} The highest-value perception fix:
+        30--50 photographs of the deployment environment's walls, curtains, and
+        wardrobes, added to the door datasets with empty labels (``nothing
+        here''), and a short fine-tune of both door models. This teaches the
+        models that these surfaces are \emph{not} doors instead of fencing
+        around the weakness with gates --- and would allow some gates to be
+        relaxed, recovering recall.
+  \item \textbf{Distance calibration.} A single ground-truth measurement per
+        device class locks the one-shot calibration constant; per-device camera
+        parameters (true field of view) would remove the nominal-FOV assumption
+        entirely.
+  \item \textbf{Vocabulary growth.} Additional destination types (hallway,
+        stairs, exit) require indicator classes COCO lacks; a small fine-tune
+        for architectural classes --- stairs, elevators, exit signs --- would
+        extend both navigation targets and obstacle awareness. Automated tests
+        for the perception layer's pure parts (edge-density and IoU logic
+        against synthetic frames) would close the current live-only validation
+        gap.
+\end{itemize}
+
+\section{User Studies}
+\label{sec:fw_studies}
+
+The decisive evaluation is a formal study with blind and low-vision participants,
+run under a safety protocol (sighted spotter, cane in use, staged environments
+first). Beyond task-level metrics --- completion rates, times, interventions ---
+the study should target the claims the design is actually built on: that
+task-scoped activation lowers cognitive load relative to continuous narration,
+that the speech discipline earns trust, and that step-count and clock-free
+directional phrasing are actionable for the population. Instrument-supported
+measures (NASA-TLX for workload, structured interviews for trust) would
+complement the task metrics. The findings should be expected to reshape the
+guidance phrasing at least as much as the original live trials reshaped
+perception.
+
+\section{Platform Evolution}
+\label{sec:fw_platform}
+
+\begin{itemize}[nosep]
+  \item \textbf{Reducing network dependence.} Progressively move latency-critical
+        pieces client-side: on-device detection for the obstacle watchdog (the
+        one component where reaction time is safety-relevant), offline TTS, or a
+        fully on-device mode on capable phones --- keeping the server path for
+        the heavy navigation stack.
+  \item \textbf{Hardened deployment.} A persistent HTTPS host in place of the
+        developer tunnel, retention policies for captured audio, debug tracing
+        behind a runtime flag, and load validation of the per-session isolation
+        the architecture already provides.
+  \item \textbf{Multilingual voice.} Whisper is inherently multilingual and gTTS
+        supports many languages; the work is in the parser's template and
+        synonym vocabularies --- with Arabic the natural first target for the
+        project's context.
+\end{itemize}

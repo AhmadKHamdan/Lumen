@@ -114,16 +114,16 @@ entirely (Section~\ref{sec:design_evolution} details this evolution). The
 architectural principle is unchanged: a thin sensing client, with all intelligence in
 a server the client reaches over the network.
 
-The system organizes assistance into three task families:
+The system organizes assistance into two task families:
 
 \begin{itemize}
     \item \textbf{Object Allocation}: locates a requested item (``find my cup'') and
           guides the user toward it with direction and distance cues derived from
-          per-class size priors.
-    \item \textbf{Reach Guidance}: once the object is within arm's reach, tracks the
-          user's hand and steers it to the target (``move your hand to the right
-          \ldots{} almost there''), completing the task automatically when the
-          fingertip reaches the object.
+          per-class size priors. Once the object is within arm's reach, the task
+          enters its \emph{reach guidance} phase: it tracks the user's hand and
+          steers it to the target (``move your hand to the right \ldots{} almost
+          there''), completing the task automatically when the fingertip reaches
+          the object.
     \item \textbf{Navigation}: guides the user to a destination room
           (``navigate to the kitchen'') through \emph{goal-directed exploration}:
           the system scans each room with a compass-anchored $360^\circ$ sweep,
@@ -167,8 +167,8 @@ The main contributions of this project are:
           deployment in minutes.
 
     \item \textbf{FSM-Governed, Testable Assistive Architecture}: explicit
-          state-machine control of every session, with the decision logic of all
-          three task families isolated from models and I/O and verified by 286
+          state-machine control of every session, with the decision logic of both
+          task families isolated from models and I/O and verified by 281
           automated tests, including scripted multi-room navigation journeys.
 \end{itemize}
 
@@ -197,7 +197,7 @@ architectures, positioning Lumen within the research landscape.
 \textbf{Chapter~\ref{ch:system_design}} presents the system architecture: the
 client--server design, the wire protocol, the session model, and the finite state
 machine, including the design's evolution from the original wearable proposal.
-\textbf{Chapter~\ref{ch:task_families}} details the three task families and their
+\textbf{Chapter~\ref{ch:task_families}} details the two task families and their
 algorithms --- Object Allocation, Reach Guidance, and goal-directed exploration
 Navigation, including the door detector training and the obstacle watchdog.
 \textbf{Chapter~\ref{ch:implementation}} describes the implementation: the technology

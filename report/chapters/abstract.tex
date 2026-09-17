@@ -23,10 +23,10 @@ MediaPipe hand tracking, and server-side speech synthesis. A finite state machin
 governs every session, making task activation, completion, cancellation, and error
 recovery explicit and testable.
 
-The system supports three task families. \emph{Object Allocation} locates a requested
-object and guides the user toward it with direction and per-class distance cues.
-\emph{Reach Guidance} takes over at close range, steering the user's hand toward the
-target and completing the task automatically when the fingertip reaches it.
+The system supports two task families. \emph{Object Allocation} locates a requested
+object and guides the user toward it with direction and per-class distance cues; at
+close range it enters a reach-guidance phase that steers the user's hand toward the
+target and completes the task automatically when the fingertip reaches it.
 \emph{Navigation} implements goal-directed exploration: the user names only a
 destination room, and Lumen guides them door-by-door using a compass-anchored
 $360^\circ$ room scan, a three-layer door-perception funnel built around a
@@ -34,11 +34,10 @@ custom-trained door detector, a pinhole distance model that speaks in steps, and
 obstacle watchdog that fuses named-object detection with class-agnostic floor
 segmentation while the user walks.
 
-The decision logic of all three tasks is isolated from models and I/O and is verified
-by an automated suite of 286 tests, including scripted multi-room navigation
+The decision logic of both task families is isolated from models and I/O and is verified
+by an automated suite of 281 tests, including scripted multi-room navigation
 journeys, while live trials in real apartments drove the perception design
-failure-by-failure. Lumen demonstrates that structured, task-scoped assistance --- perception
-aligned with user intent --- can be delivered on commodity hardware while respecting
+failure-by-failure. Lumen demonstrates that structured, task-scoped assistance can be delivered on commodity hardware while respecting
 the cognitive load, autonomy, and safety of blind users.
 
 % -------- Arabic Abstract --------
@@ -53,8 +52,8 @@ the cognitive load, autonomy, and safety of blind users.
 
 لا يتطلب «لومن» أي عتاد مخصص ولا تثبيت أي تطبيق؛ إذ يفتح المستخدم صفحة ويب على هاتف ذكي عادي، فيبث المتصفح إطارات الكاميرا والأوامر الصوتية واتجاه البوصلة عبر اتصال وِب سوكِت واحد إلى خادم بايثون يشغّل كامل منظومة الإدراك والكلام: التعرف على الكلام، ومحلل أوامر متسامح مع أخطاء النسخ، وكشف الأجسام بنموذج يولو، وتتبع اليد، وتوليد الكلام من جهة الخادم. وتحكم آلة حالات منتهية كل جلسة، مما يجعل تفعيل المهام وإكمالها وإلغاءها والتعافي من الأخطاء أموراً صريحة وقابلة للاختبار.
 
-يدعم النظام ثلاث عائلات من المهام: «تحديد موقع الأجسام» التي تجد الجسم المطلوب وترشد المستخدم نحوه بإشارات الاتجاه والمسافة، و«إرشاد الوصول» الذي يتولى المهمة عن قرب فيوجّه يد المستخدم نحو الهدف ويُكمل المهمة تلقائياً عند ملامسة أطراف الأصابع له، و«الملاحة» التي تطبق الاستكشاف الموجه بالهدف: يذكر المستخدم اسم الغرفة المقصودة فقط، فيرشده «لومن» من باب إلى باب عبر مسح دائري للغرفة مثبت بالبوصلة، وكشف الوصول الدلالي من الأجسام الدالة على الغرفة، ومنظومة إدراك أبواب ثلاثية الطبقات مبنية حول كاشف أبواب مدرب خصيصاً، ونموذج مسافة يتحدث بالخطوات، وكشف عبور المدخل، وحارس عوائق يدمج كشف الأجسام المسماة مع تقسيم أرضية المشهد أثناء سير المستخدم.
+يدعم النظام عائلتين من المهام: «تحديد موقع الأجسام» التي تجد الجسم المطلوب وترشد المستخدم نحوه بإشارات الاتجاه والمسافة، وتدخل عن قرب في طور «إرشاد الوصول» الذي يوجّه يد المستخدم نحو الهدف ويُكمل المهمة تلقائياً عند ملامسة أطراف الأصابع له، و«الملاحة» التي تطبق الاستكشاف الموجه بالهدف: يذكر المستخدم اسم الغرفة المقصودة فقط، فيرشده «لومن» من باب إلى باب عبر مسح دائري للغرفة مثبت بالبوصلة، وكشف الوصول الدلالي من الأجسام الدالة على الغرفة، ومنظومة إدراك أبواب ثلاثية الطبقات مبنية حول كاشف أبواب مدرب خصيصاً، ونموذج مسافة يتحدث بالخطوات، وكشف عبور المدخل، وحارس عوائق يدمج كشف الأجسام المسماة مع تقسيم أرضية المشهد أثناء سير المستخدم.
 
-جرى عزل منطق القرار في المهام الثلاث عن النماذج والمدخلات والمخرجات، ويجري التحقق منه عبر مجموعة آلية من 286 اختباراً تشمل رحلات ملاحة متعددة الغرف. وقد وجّهت التجارب الحية في شقق حقيقية تصميم الإدراك خطوةً بخطوة. يبرهن «لومن» على أن المساعدة المنظمة المحددة بالمهام يمكن تقديمها على عتاد شائع مع احترام الحمل المعرفي واستقلالية وسلامة المستخدمين المكفوفين.
+جرى عزل منطق القرار في عائلتي المهام عن النماذج والمدخلات والمخرجات، ويجري التحقق منه عبر مجموعة آلية من 281 اختباراً تشمل رحلات ملاحة متعددة الغرف. وقد وجّهت التجارب الحية في شقق حقيقية تصميم الإدراك خطوةً بخطوة. يبرهن «لومن» على أن المساعدة المنظمة المحددة بالمهام يمكن تقديمها على عتاد شائع مع احترام الحمل المعرفي واستقلالية وسلامة المستخدمين المكفوفين.
 
 \selectlanguage{english}

@@ -4,129 +4,690 @@
 \chapter{Implementation}
 \label{ch:implementation}
 
-\section{Technology Stack}
+This chapter documents the system as it exists in the repository: the technology
+choices, the wire protocol, the backend's layered organization, the two task
+engines, the frontend, deployment, and the test infrastructure. Wherever a number
+appears --- a threshold, a rate, a file size, a line count --- it is the value in
+the committed source.
 
-\begin{table}[H]
+\section{Technology Stack}
+\label{sec:tech_stack}
+
+Table~\ref{tab:stack} summarizes the technology choices; each was made for a
+concrete engineering reason rather than familiarity.
+
+\begin{table}[!htbp]
 \centering
 \caption{Technology choices and their rationale.}
 \label{tab:stack}
-\begin{tabular}{p{3.2cm} p{3.6cm} p{7.2cm}}
+\small
+\begin{tabular}{p{2.6cm} p{3.2cm} p{7.0cm}}
 \toprule
 \textbf{Layer} & \textbf{Choice} & \textbf{Why} \\
 \midrule
-Server & FastAPI + uvicorn & Async WebSockets, single process serves API, WS, and frontend same-origin. \\
-STT & faster-whisper (base) & Whisper weights on a CTranslate2 backend: ${\sim}4\times$ faster on CPU, no heavyweight framework dependency. \\
-Audio decode & PyAV & Bundles FFmpeg in the wheel --- no system dependency for decoding PTT audio. \\
-Detection (objects) & YOLOv8n & ${\sim}6$\,MB, CPU-real-time at 5\,FPS, COCO classes match the task vocabulary. \\
-Detection (navigation) & YOLOv8m + 2 custom door models & Recall on indicators at angle/distance is the bottleneck; door models fill COCO's missing class. \\
-Floor segmentation & SegFormer-B0 (ADE20K) & Real-time per-pixel walkability for the obstacle lane; optional --- degrades to named objects only. \\
-Hand pose & MediaPipe Hands & 21 landmarks, CPU real-time, models bundled. \\
-TTS & gTTS + LRU cache & Natural voice; caching hides latency for the fixed guidance phrases. \\
-Command parsing & rapidfuzz & Structural prefix+noun fuzzy matching tolerates Whisper mishearings. \\
-Frontend & Vanilla HTML/JS & No build step; one less moving part; served by the backend itself. \\
+Server & FastAPI + uvicorn & Async WebSockets; a single process serves the API, the WebSocket, and the frontend same-origin. \\
+STT & faster-whisper (base) & Whisper weights on a CTranslate2 backend: ${\sim}4\times$ faster CPU inference, prebuilt Python 3.13 wheels, no heavyweight framework dependency. \\
+Audio decode & PyAV & Bundles the FFmpeg shared libraries inside the wheel --- no system \texttt{ffmpeg} required to decode push-to-talk audio. \\
+Detection (objects) & YOLOv8n & ${\sim}6$\,MB, CPU-real-time at 5\,FPS, COCO classes match the task vocabulary verbatim. \\
+Detection (navigation) & YOLOv8m + 2 custom door models & Recall on room indicators at angle and distance is the bottleneck, not inference time; the door models fill COCO's missing class. \\
+Floor segmentation & SegFormer-B0 (ADE20K) & Per-pixel walkability for the obstacle lane; optional --- degrades to named objects only. \\
+Hand pose & MediaPipe Hands & 21 landmarks, CPU real-time; the model file is auto-downloaded and cached like the YOLO weights. \\
+TTS & gTTS + LRU cache & Natural voice; a bounded 50-entry cache keyed by exact text absorbs the repeated guidance templates. \\
+Command parsing & rapidfuzz & Structural prefix-plus-noun fuzzy matching tolerates Whisper mishearings. \\
+Frontend & Vanilla HTML/JS & No build step; seven small ES modules, served by the backend itself. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Python dependencies are version-pinned in \texttt{requirements.txt}, with two
+deliberate exceptions documented inline: \texttt{ultralytics} and
+\texttt{faster-whisper} carry open lower bounds so \texttt{pip} resolves
+Python-3.13-compatible builds of their transitive dependencies (torch,
+torchvision, PyAV). faster-whisper was chosen over the reference
+\texttt{openai-whisper} package specifically because the latter's installer breaks
+on Python 3.13 (a \texttt{locals()}-after-\texttt{exec()} pattern invalidated by
+PEP 667), while faster-whisper ships prebuilt wheels, runs the same model weights
+${\sim}4\times$ faster on CPU via CTranslate2, and pulls in no deep-learning
+framework of its own.
+
+\section{Code Organization at a Glance}
+\label{sec:code_org}
+
+The repository holds the backend, the frontend, the door-model training pipeline,
+and the design documents. Table~\ref{tab:loc} gives the implementation's scale;
+the counts are of the committed source.
+
+\begin{table}[!htbp]
+\centering
+\caption[Implementation scale]{Implementation scale by component (lines of committed source).}
+\label{tab:loc}
+\small
+\begin{tabular}{p{6.4cm} r p{5.2cm}}
+\toprule
+\textbf{Component} & \textbf{Lines} & \textbf{Contents} \\
+\midrule
+Backend (\texttt{backend/}, excl.\ tests) & 5{,}403 & API layer, FSM, all services, both task engines \\
+\quad of which \texttt{services/navigation/} & 2{,}190 & the nine-module navigation package \\
+Automated tests (\texttt{backend/tests/}) & 2{,}079 & 13 test modules, 281 collected cases \\
+Frontend (\texttt{frontend/}) & 1{,}435 & 7 ES modules + page + stylesheet \\
+Door training (\texttt{door\_training/}) & ${\sim}400$ & dataset converters, builder, device check \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{The Wire Protocol}
+\label{sec:wire_protocol}
+
+A single WebSocket per session carries two channels: JSON text frames for control,
+and tagged binary frames for media. Every binary frame is prefixed with a one-byte
+type tag (Table~\ref{tab:bintags}); every JSON message carries a \texttt{type}
+field (Table~\ref{tab:jsonmsgs}). The contract was frozen early in development and
+is documented in \texttt{docs/protocol.md}; anything out of protocol is logged and
+ignored, optionally answered with a \texttt{protocol\_violation} error, so an
+old client can never crash the server.
+
+\begin{table}[!htbp]
+\centering
+\caption[Binary frame tags]{Binary frame tags on the shared WebSocket.}
+\label{tab:bintags}
+\small
+\begin{tabular}{c l p{7.6cm}}
+\toprule
+\textbf{Tag} & \textbf{Direction} & \textbf{Payload} \\
+\midrule
+\texttt{0x01} & client $\to$ server & one JPEG camera frame ($640\times480$, quality 70, ${\sim}5$\,FPS) \\
+\texttt{0x02} & client $\to$ server & one WebM/Opus push-to-talk recording (on button release) \\
+\texttt{0x03} & server $\to$ client & one MP3 TTS clip (queued and played sequentially) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption[JSON control messages]{JSON control messages on the shared WebSocket.}
+\label{tab:jsonmsgs}
+\small
+\begin{tabular}{l l p{7.4cm}}
+\toprule
+\textbf{Message} & \textbf{Direction} & \textbf{Purpose} \\
+\midrule
+\texttt{user\_event}    & c $\to$ s & UI lifecycle: \texttt{start}, \texttt{stop}, \texttt{cancel}, \texttt{confirm} \\
+\texttt{motion}         & c $\to$ s & accelerometer state (\texttt{still} / \texttt{moving} / \texttt{walking}), sent on change only \\
+\texttt{heading}        & c $\to$ s & compass heading in degrees, throttled to ${\geq}2^\circ$ change at ${\leq}5$\,Hz \\
+\texttt{resume}         & c $\to$ s & previous session id, to restore a task after a dropped connection \\
+\texttt{session\_hello} & s $\to$ c & the new session's id, stored client-side for later resume \\
+\texttt{fsm\_state}     & s $\to$ c & authoritative task state on every FSM transition \\
+\texttt{transcription}  & s $\to$ c & Whisper text + confidence proxy, for visual audit \\
+\texttt{haptic}         & s $\to$ c & symbolic vibration pattern name (Section~\ref{sec:continuity}) \\
+\texttt{error}          & s $\to$ c & non-fatal, machine-readable error with code and message \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \section{Backend Organization}
+\label{sec:backend_org}
 
 The backend is a single Python process organized in four layers.
-\textbf{API layer} (\texttt{api/}): the WebSocket router dispatches JSON control
-messages and tagged binary frames; the frame handler decodes JPEGs to arrays; the
-audio handler runs the PTT pipeline (decode $\to$ transcribe $\to$ parse $\to$ FSM
-event $\to$ spoken confirmation); the session object owns per-connection state.
-\textbf{FSM layer} (\texttt{fsm/}): the five-state task machine with explicit
-transitions and subscriber hooks. \textbf{Services layer} (\texttt{services/}):
-speech, parsing, detection, hand pose, spatial reasoning, and guidance generation as
-stateless, individually testable modules. \textbf{Task engines}: Object Allocation
-(with Reach Guidance) and the Navigation package
-(\texttt{services/navigation/}), each an asynchronous per-session loop started and
-cancelled by FSM entry/exit hooks.
 
-\section{The Per-Session Navigation Engine}
+\textbf{API layer} (\texttt{api/}). The WebSocket router dispatches incoming
+messages: JSON text frames by their \texttt{type} field, binary frames by their
+one-byte tag. The frame handler decodes JPEG payloads to RGB arrays via Pillow and
+stores the latest frame (with its timestamp) on the session --- task loops always
+read the freshest frame rather than queuing frames, so processing can never fall
+progressively behind the camera. The audio handler runs the complete push-to-talk
+pipeline described in Section~\ref{sec:voice_pipeline}. The \texttt{Session}
+object owns all per-connection state: the FSM, the latest decoded frame and its
+timestamp, the latest motion state and compass heading, the task context (target
+or destination, start time), the last spoken phrase (for the ``repeat'' command),
+and the handle to the running task loop's asyncio task; an \texttt{asyncio.Lock}
+serializes concurrent sends over the socket, since the WebSocket object is not
+safe under overlapping \texttt{send} calls.
+
+\textbf{FSM layer} (\texttt{fsm/}). The five-state task machine of
+Section~\ref{sec:fsm}, implemented as an explicit transition function with
+subscriber callbacks; Table~\ref{tab:fsm_transitions} lists the complete
+transition table as implemented --- every pair not shown is rejected with a
+logged warning and no state change. The session subscribes: on every transition it
+runs exit hooks for the old state (cancelling the old task loop), entry hooks for
+the new state (starting the new task loop, reading the target from the task
+context), and pushes the new wire-format state name to the client. Entering the
+transitional ReturningToIdle state schedules \texttt{cleanup\_done} for the next
+event-loop tick, so the client observes both transitions in order.
+
+\begin{table}[!htbp]
+\centering
+\caption[FSM transition table]{The complete FSM transition table as implemented.
+Events not listed for a state are rejected (logged, no transition).}
+\label{tab:fsm_transitions}
+\small
+\begin{tabular}{p{3.9cm} p{4.8cm} p{4.2cm}}
+\toprule
+\textbf{Current state} & \textbf{Event} & \textbf{Next state} \\
+\midrule
+Idle & \texttt{user\_start} & Listening \\
+Listening & \texttt{command\_recognized} (object) & ObjectAllocationActive \\
+Listening & \texttt{command\_recognized} (navigation) & NavigationActive \\
+Listening & \texttt{command\_unknown} & Listening (no-op) \\
+ObjectAllocation / Navigation & \texttt{task\_complete} & ReturningToIdle \\
+ObjectAllocation / Navigation & \texttt{task\_abort} & Listening \\
+any non-Idle state & \texttt{user\_stop} & ReturningToIdle \\
+ReturningToIdle & \texttt{cleanup\_done} & Idle \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The distinction between \texttt{task\_abort} and \texttt{user\_stop} is a
+deliberate accessibility decision: a voice ``cancel'' during a task drops back to
+\emph{listening}, so the user can immediately speak the next command; only the
+explicit Stop gesture (or a fatal condition) returns the session to Idle, where
+the next interaction requires the Start button --- which a blind user would have
+to hunt for mid-flow.
+
+\textbf{Services layer} (\texttt{services/}). Speech recognition, command parsing,
+TTS, object detection, hand pose, spatial reasoning, and guidance phrase
+generation, each a stateless, individually importable module. Heavy ML imports are
+deferred to first use behind thread-safe, double-checked lazy loaders, so
+importing a service --- in tests, or at server start --- costs nothing; the pure
+helpers inside them (detection parsing, landmark conversion) are directly
+unit-testable without any ML framework installed. The spatial-reasoning module
+carries the complete per-class size-prior table (Table~\ref{tab:priors}): for
+each supported COCO class, the apparent size --- the larger of the box's width and
+height as a fraction of the frame --- expected when the object sits at arm's reach
+(${\sim}40$\,cm) in front of a typical phone camera.
+
+\begin{table}[!htbp]
+\centering
+\caption[Per-class distance priors]{The per-class ``near at arm's reach''
+apparent-size priors used for distance bucketing. \emph{near} at ${\geq}0.85$ of
+the class prior; \emph{far} at ${\leq}0.35$; \emph{medium} between. Unlisted
+classes default to 0.22 (book-sized).}
+\label{tab:priors}
+\small
+\begin{tabular}{p{1.6cm} p{5.6cm} p{5.4cm}}
+\toprule
+\textbf{Prior} & \textbf{Classes} & \textbf{Physical intuition} \\
+\midrule
+0.10 & mouse, scissors & palm-sized \\
+0.12 & cell phone, remote & narrow handhelds \\
+0.18 & cup, bottle, clock, vase & hand-sized; bottles are tall, the $\max(w,h)$ cue covers them \\
+0.22 & book & the fallback default \\
+0.40 & keyboard, laptop, microwave, sink, toilet, chair & mid-sized objects and fixtures \\
+0.50 & oven, dining table & large appliances / furniture \\
+0.55--0.60 & TV; couch, bed, refrigerator & the largest classes --- near only when they dominate the frame \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Task engines.} Object Allocation (which contains the reach-guidance phase)
+and the Navigation package, each an asynchronous per-session loop created by the
+FSM entry hook and cancelled by the exit hook --- so a task can never outlive its
+state. Both entry hooks first cancel any loop already attached to the session, so
+even a pathological double transition cannot leak a running loop.
+
+\section{The Voice Pipeline}
+\label{sec:voice_pipeline}
+
+A push-to-talk release delivers one WebM/Opus blob to the audio handler, which
+first saves it to disk (\texttt{captured\_audio/}, timestamped per session) for
+offline inspection, then runs:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Decode.} PyAV auto-detects the container from the bytes and
+        resamples to the 16\,kHz mono float PCM Whisper expects; a resampler
+        flush recovers the trailing samples, and a blob without an audio stream
+        degrades to an empty transcription rather than an exception.
+  \item \textbf{Transcribe.} faster-whisper (\texttt{base}, \texttt{int8}
+        quantization, beam size 5, English, no VAD --- the push-to-talk gesture
+        already trims the utterance) materializes the segments; a confidence proxy
+        in $[0,1]$ is derived as $e^{\overline{\log p}}$ from the average
+        log-probability. The transcription and confidence are pushed to the client
+        for visual audit.
+  \item \textbf{Parse.} The command parser classifies the utterance as a task
+        command, a completion (confirm / cancel), an information query (describe /
+        repeat), or unknown.
+  \item \textbf{Act.} Task commands populate the task context \emph{before}
+        firing \texttt{command\_recognized} --- the FSM entry hook reads the
+        target synchronously inside the event. Completions route by context:
+        ``got it'' during a task fires \texttt{task\_complete}; ``cancel'' during
+        a task fires \texttt{task\_abort}, dropping back to listening; ``cancel''
+        while merely listening ends the session.
+  \item \textbf{Confirm.} Every path ends in a spoken response --- a confirmation
+        (``Looking for your cup.''), a completion phrase naming the object, or a
+        retry prompt --- synthesized by gTTS and shipped as an MP3 binary frame.
+\end{enumerate}
+
+Failures speak too: an undecodable or silent recording produces ``I didn't hear
+anything. Please try again,'' alongside a machine-readable error --- the spoken cue
+matters most, since a blind user has nothing to look at.
+
+\subsection{The Command Parser}
+\label{sec:command_parsing_impl}
+
+Rather than matching whole utterances, the parser tries every (prefix, target)
+split of the normalized input, fuzzy-matching the prefix against the command
+templates and the target against the noun vocabulary with rapidfuzz's ratio
+scorer, and taking the best-scoring combination over all splits; both endpoints
+slide, so trailing filler (``\ldots{} please'') is tolerated. Normalization
+lowercases, strips punctuation, collapses whitespace, and applies a synonym table
+at word boundaries \emph{before} matching, canonicalizing common aliases and
+mishearings (``fone'' $\to$ cell phone, ``fridge'' $\to$ refrigerator, ``sofa''
+$\to$ couch, ``washroom'' $\to$ bathroom) so the fuzzy thresholds do not have to
+be widened to absorb them. Completion and information phrases are matched with
+token-set similarity --- so ``okay, I got it, thanks'' still matches ``got it''
+--- but are restricted to short utterances and high score thresholds so they can
+never steal a genuine find/navigate command. Table~\ref{tab:parser} lists the
+vocabulary sizes and thresholds as committed.
+
+\begin{table}[!htbp]
+\centering
+\caption[Parser vocabulary and thresholds]{Command-parser vocabulary sizes and
+matching thresholds (rapidfuzz scores, 0--100).}
+\label{tab:parser}
+\small
+\begin{tabular}{p{7.4cm} r}
+\toprule
+\textbf{Vocabulary} & \textbf{Size} \\
+\midrule
+Object Allocation prefixes (``find my'', ``where is'', \ldots) & 16 \\
+Navigation prefixes (``take me to'', ``go to the'', \ldots) & 10 \\
+Object nouns (COCO class names, verbatim) & 21 \\
+Navigation destinations & 10 \\
+Synonym / mishearing rewrites & 21 \\
+Completion --- confirm phrases (``got it'', ``found it'', \ldots) & 13 \\
+Completion --- cancel phrases (``stop'', ``never mind'', \ldots) & 12 \\
+Info --- describe phrases (``what do you see'', \ldots) & 15 \\
+Info --- repeat phrases (``say that again'', \ldots) & 9 \\
+\midrule
+\textbf{Threshold} & \textbf{Value} \\
+\midrule
+Prefix similarity floor & 70 \\
+Noun similarity floor & 60 \\
+Combined (mean) floor & 65 \\
+Completion match: token-set score / max words & 86 / 5 \\
+Info match: token-set score / max words & 82 / 8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The thresholds are deliberately permissive at the task layer: the worst case of a
+false positive there is a wrong spoken confirmation the user immediately corrects,
+whereas a false \emph{negative} forces a blind user to repeat themselves.
+Completion matching is the opposite --- strict and length-limited --- because a
+completion misfire silently ends a running task. During navigation, the same
+mid-task channel additionally accepts direction hints --- \emph{left},
+\emph{right}, \emph{ahead}, \emph{behind}, and their common variants --- consumed
+by the multi-door dialogue of Section~\ref{sec:multi_door} when a scan has found
+more than one door.
+
+\section{The Object Allocation Engine}
+\label{sec:oa_engine}
+
+The engine separates decision from I/O. All policy --- the temporal filter, the
+per-class buckets, the debounce, the throttles, the scan/lost/timeout edges, and
+the reach state machine --- lives in a \texttt{GuidanceTracker} class that is pure:
+it receives detections, the frame shape, an injected timestamp, the optional hand
+pose, and the motion state, and returns an action and a phrase (or nothing). The
+asynchronous shell around it only does I/O: it grabs the latest frame, runs YOLO
+(and, when the tracker says the target is near, MediaPipe) in worker threads so
+the event loop keeps serving the WebSocket, ships any pending haptic pulse
+\emph{before} the phrase --- a brief vibration a beat before the voice cue is a
+better ``you're close'' signal than after --- speaks the phrase, and sleeps to the
+5\,Hz cadence. Two actions end the loop from inside: \emph{touch} fires
+\texttt{task\_complete} (the auto-grasp exit), and \emph{timeout} fires
+\texttt{user\_stop} after the apology. Table~\ref{tab:oa_constants} collects the
+engine's tuning constants.
+
+\begin{table}[!htbp]
+\centering
+\caption[Object Allocation tuning constants]{Object Allocation engine constants as committed.}
+\label{tab:oa_constants}
+\small
+\begin{tabular}{p{7.8cm} l}
+\toprule
+\textbf{Constant} & \textbf{Value} \\
+\midrule
+Detection loop rate & 5\,Hz \\
+YOLO confidence floor (search) / (describe query) & 0.35 / 0.50 \\
+Temporal window / required hits & 5 frames / 3 \\
+Spatial debounce (consecutive same-bucket frames) & 2 (${\sim}400$\,ms) \\
+Guidance re-affirm interval & 6\,s \\
+Scan-prompt interval (target never seen) & 8\,s \\
+Not-found timeout & 60\,s \\
+Reach cue re-affirm interval & 5\,s \\
+Reach grace period (hand momentarily lost) & 3\,s \\
+``Almost there'' zone (fingertip-to-centroid) & 15\% of frame \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{The Navigation Engine: From Prototype to Integration}
 \label{sec:nav_engine}
 
-The navigation package separates concerns strictly: \texttt{config.py} holds every
-tuning constant in one place, each annotated with the failure that motivated its
-value; \texttt{goals.py} the destination model; \texttt{perception.py} the door
-funnel; \texttt{geometry.py} the compass and bearing mathematics;
-\texttt{obstacles.py} the watchdog; \texttt{controller.py} the pure decision layer;
-\texttt{models.py} lazy, thread-safe model loading shared across sessions; and
-\texttt{engine.py} the asynchronous loop wiring them together. All mutable state
-lives in a per-session \texttt{NavState} object, so concurrent users cannot
-interfere --- a deliberate upgrade from the single-user prototype in which this
-logic was first field-tested.
+The navigation subsystem has an unusual history that shaped its implementation:
+it was built and field-tested as a \emph{standalone prototype} before being
+integrated into the backend.
 
-Three timing decisions matter for correctness. First, the engine measures each
-tick's real duration and passes it to the controller, whose pacing constants are
-expressed in \emph{seconds of observed frames} --- so timers keep their tuned
-meaning regardless of load, and evidence thresholds (which are counts of
-consecutive observations) remain counts. Second, the tick duration is clamped:
-time during a stall contains no frames and therefore is not evidence that anything
-appeared or disappeared. Third, a frozen-feed guard skips any frame that is stale
-or already processed --- a locked screen or dropped connection can never accumulate
-``evidence'' from a frozen image.
+\subsection{The Standalone Prototype}
 
-\section{The Speech Pipeline}
-\label{sec:speech_pipeline}
+The exploration pipeline was developed in a self-contained web demo: a minimal
+FastAPI server exposing an HTTP \texttt{/detect} endpoint, a single-page frontend
+that captured the rear camera and compass, POSTed one frame at a time (${\sim}3$
+per second) as a base64 data URL, and spoke the returned guidance through the
+browser's own speech synthesis. All state was module-global --- one user, one
+journey. This shape was deliberate: it let the perception stack be iterated
+against real phone footage in real rooms, failure by failure, with per-candidate
+debug traces printed at the terminal for every keep/reject decision, without
+touching the main backend. The prototype survives in the repository history
+(branch \texttt{nav-integration}, directory \texttt{webdemo/}) as a record of
+that phase.
 
-Guidance text reaches the user through a per-session speech queue drained by a
-dedicated worker: the perception loop enqueues and moves on, so TTS synthesis
-latency never stalls detection or distorts its timers. The two-tier policy from
-Section~\ref{sec:speech_discipline} is enforced at the queue: priority lines always
-enqueue; ambient lines are dropped unless the pipe is idle. Synthesized MP3s are
-cached in a bounded LRU keyed by exact text; at server startup an optional preload
-warms both the navigation models and the fixed guidance phrases, so the first
-navigation command of a session answers immediately and the common utterances
-survive network hiccups. On the client, clips play through a single persistent,
-gesture-primed \texttt{<audio>} element --- the pattern required for autoplaying
-synthesized speech on iOS Safari.
+\subsection{Integration}
+
+Once field-tested, the prototype was ported into the backend's
+\texttt{services/navigation/} package. The decision logic was kept unchanged
+where possible, byte for byte; what changed is the plumbing:
+
+\begin{itemize}[nosep]
+  \item \textbf{Per-session state.} The module-global state dictionary became a
+        \texttt{NavState} class, one instance per session, preserving dict-style
+        access (\texttt{st["mode"]}) so the ported decision code reads identically
+        to the field-tested original. Phase transitions go through
+        \texttt{enter\_*} methods --- the only sanctioned way to switch phase ---
+        each of which resets exactly the fields that phase depends on (fresh
+        approach $\Rightarrow$ fresh obstacle debounce, fresh transit latch, fresh
+        one-shot call-out flag).
+  \item \textbf{Frame transport.} One HTTP POST per frame became a server-driven
+        loop over the session's WebSocket frame stream: the engine reads the
+        latest decoded frame each tick instead of being pushed one. One conversion
+        happens at the boundary: the frame handler stores RGB, while the ported
+        perception stack --- and every threshold tuned against it --- speaks
+        OpenCV's BGR, so the engine converts once per tick.
+  \item \textbf{Speech.} Browser speech synthesis became server-side gTTS over
+        the same binary TTS channel every other task uses; the prototype
+        frontend's queueing rules were re-implemented server-side as the
+        priority/ambient policy of Section~\ref{sec:speech_discipline}.
+  \item \textbf{Model loading.} The prototype loaded all models at import. The
+        integrated package loads lazily behind a thread-safe
+        \texttt{ensure\_loaded()}, called in a worker thread by the first
+        navigation task in the server's lifetime --- announced to the user as
+        ``Give me a moment while I get ready'' --- then reused by every later
+        session; the models are stateless and shared, the state is not. A warm-up
+        inference on a blank frame at load time moves GPU kernel initialization
+        off the first real frame, which would otherwise be a long silence at the
+        start of the first journey.
+\end{itemize}
+
+\subsection{Package Layout and the Per-Frame Pipeline}
+
+The package separates concerns strictly (Table~\ref{tab:nav_modules}), and
+\texttt{config.py} concentrates all 64 tuning constants in one file, each
+annotated in source with the live failure that motivated its value --- so a
+threshold is never a magic number, and re-tuning for a new environment touches
+one file.
+
+\begin{table}[!htbp]
+\centering
+\caption[Navigation package layout]{The \texttt{services/navigation/} package (2{,}190 lines total).}
+\label{tab:nav_modules}
+\small
+\begin{tabular}{l r p{8.0cm}}
+\toprule
+\textbf{Module} & \textbf{Lines} & \textbf{Responsibility} \\
+\midrule
+\texttt{config.py}     & ${\sim}250$ & all 64 tuning constants, grouped by concern, values only \\
+\texttt{controller.py} & ${\sim}620$ & the exploration state machine and every spoken phrase (pure) \\
+\texttt{perception.py} & ${\sim}320$ & the door funnel, COCO stage, overlay boxes, door geometry \\
+\texttt{engine.py}     & ${\sim}230$ & the 3\,Hz async loop; motion gate; the speech policy \\
+\texttt{obstacles.py}  & ${\sim}200$ & the walking-lane watchdog: named-object + floor layers \\
+\texttt{models.py}     & ${\sim}160$ & thread-safe lazy loading + warm-up of the five models \\
+\texttt{state.py}      & ${\sim}150$ & per-session \texttt{NavState}; the \texttt{enter\_*} phase resets \\
+\texttt{goals.py}      & ${\sim}150$ & destination aliases, indicator tables, the arrival rule \\
+\texttt{geometry.py}   & ${\sim}110$ & compass/bearing math, clustering, the $\pm180^\circ$ seam (pure) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each 3\,Hz tick, the engine: reads the latest frame and heading off the session;
+converts RGB to BGR; runs the blocking perception stage in a worker thread ---
+motion gate, COCO objects, the door funnel, door geometry, indicator-evidence
+accumulation, transit detection, and the obstacle watchdog --- and hands the
+result to \texttt{controller.step()}, which returns the guidance line, its
+priority tier, and the arrival verdict. Priority lines are spoken immediately;
+ambient lines pass the repeat/gap filters first. Arrival speaks the composed
+summary-plus-arrival phrase and fires \texttt{task\_complete}; a destination the
+goal model cannot resolve speaks an apology listing the supported rooms and fires
+\texttt{user\_stop}. Cancellation --- voice ``stop'', the Stop button, or a
+disconnect --- funnels through the FSM exit hook, which cancels the loop's asyncio
+task. Table~\ref{tab:nav_constants} collects the constants most consequential to
+behavior; the failure each one answers is discussed with its mechanism in
+Chapter~\ref{ch:task_families}.
+
+\begin{table}[!htbp]
+\centering
+\caption[Key navigation constants]{Key navigation constants as committed
+(selection; \texttt{config.py} holds all 64).}
+\label{tab:nav_constants}
+\small
+\begin{tabular}{p{8.2cm} l}
+\toprule
+\textbf{Constant} & \textbf{Value} \\
+\midrule
+Detection loop rate & 3\,Hz \\
+COCO / door confidence floors & 0.45 / 0.45 \\
+Door temporal rule (window / hits) & 2-of-3 \\
+Strong-door confidence (passes without corroboration) & 0.60 \\
+Verifier confidence / corroboration IoU & 0.30 / 0.40 \\
+Door max width/height ratio; max frame fill (scan) & 1.4; 0.80 \\
+Door edge-density demotion threshold & 0.030 \\
+Min door sighting units / indicator sightings per scan & 3 / 4 \\
+Scan sectors; full-turn / return-to-start tolerances & $12\times30^\circ$; $350^\circ$ / $25^\circ$ \\
+Motion-gate threshold / coach after consecutive frames & 85.0 / 3 \\
+Door height / assumed HFOV / step length & 2.0\,m / $60^\circ$ / 0.75\,m \\
+At-door: fill fraction / near distance / arming streak & 0.85 / 2.0\,m / 2 frames \\
+Transit: gone cycles / min walking frames / hold cap & 6 / 4 / 40 \\
+Obstacle lane (horizontal band) / min overlap & 0.30--0.70 / 0.10 \\
+Obstacle debounce: blocked / clear / re-warn frames & 3 / 2 / 9 \\
+Floor lane rows / band / min walkable cover & 0.66--0.94 / 0.38--0.62 / 0.60 \\
+Ambient speech: min gap / identical-line repeat window & 2.5\,s / 8\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Session Continuity and Haptics}
+\label{sec:continuity}
+
+Two smaller mechanisms round out the session model. \textbf{Resume.} On every
+connection the server sends the client its session id (\texttt{session\_hello});
+the client stores it in local storage. If the connection later drops with a task
+active, the session's cleanup saves the task type and target into a resume pool
+with a five-minute TTL (pruned on access, so the pool stays bounded). On the next
+connect the client presents the old id; if live state exists, the server announces
+``Resuming search for your cup,'' then re-drives the FSM through the normal
+start-and-recognize path so the task loop restarts identically to a fresh request.
+\textbf{Haptics.} The server sends symbolic pattern names that the client maps to
+vibration sequences (Table~\ref{tab:haptics}); iOS has no vibration API, so the
+client degrades silently there and voice remains the primary channel. Unknown
+pattern names are ignored, keeping the vocabulary extensible without client
+updates.
+
+\begin{table}[!htbp]
+\centering
+\caption[Haptic vocabulary]{The haptic pattern vocabulary.}
+\label{tab:haptics}
+\small
+\begin{tabular}{l l l}
+\toprule
+\textbf{Pattern} & \textbf{Vibration} & \textbf{Meaning} \\
+\midrule
+\texttt{short}   & ${\sim}40$\,ms tap    & entered the reach ``almost'' zone \\
+\texttt{medium}  & ${\sim}80$\,ms tap    & generic acknowledgement \\
+\texttt{long}    & ${\sim}200$\,ms       & fingertip touched the target box \\
+\texttt{success} & double tap            & task completed via voice ``got it'' \\
+\texttt{cancel}  & single medium tap     & task cancelled \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Frontend}
 \label{sec:frontend}
 
-The client is deliberately thin: five small JavaScript modules coordinate the
-WebSocket, media capture (640$\times$480 JPEG at 5\,FPS; MediaRecorder for PTT),
-the audio queue, a wake lock, a device-motion classifier (still / moving /
-walking), and a compass monitor (throttled headings for the navigation scan). iOS
-imposes the notable constraints: motion and orientation permissions must be
-requested inside the Start button's click gesture, and audio must be unlocked by
-playing a primed silent clip in that same gesture. The entire session UI is
-voice-first --- the screen shows connection state, FSM state, and the last
-transcription, but no interaction beyond Start, Stop, and the tap-anywhere
-push-to-talk surface is required.
+The client is deliberately thin: a coordinator plus six focused ES modules
+(Table~\ref{tab:frontend_modules}), 1{,}435 lines in total including markup and
+styles, with no build step --- the backend serves the files directly.
+
+\begin{table}[!htbp]
+\centering
+\caption[Frontend modules]{Frontend modules.}
+\label{tab:frontend_modules}
+\small
+\begin{tabular}{l r p{7.8cm}}
+\toprule
+\textbf{Module} & \textbf{Lines} & \textbf{Responsibility} \\
+\midrule
+\texttt{app.js}         & 322 & coordinator: button wiring, audio priming, PTT gestures \\
+\texttt{media.js}       & 203 & getUserMedia; $640\times480$ JPEG at 5\,FPS; PTT MediaRecorder \\
+\texttt{ws\_client.js}  & 197 & JSON dispatch by type; tagged binary dispatch; one auto-retry \\
+\texttt{audio\_queue.js}& 192 & the primed persistent audio element; sequential playback \\
+\texttt{motion.js}      & 108 & accelerometer window $\to$ still / moving / walking \\
+\texttt{heading.js}     &  83 & compass monitor, throttled to ${\geq}2^\circ$ at ${\leq}5$\,Hz \\
+\texttt{wakelock.js}    &  51 & screen wake lock with visibility-change re-acquisition \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Design decisions that matter:
+
+\begin{itemize}[nosep]
+  \item \textbf{Tap-anywhere push-to-talk.} Any pointer-down anywhere on the page
+        (excluding the Start/Stop controls) starts recording and the matching
+        pointer-up stops it, attached at document level so a drag off the
+        original target still ends cleanly, with a blur handler as a safety net
+        so a backgrounded tab never leaves the microphone hot. The visible PTT
+        button remains as a large tactile target and recording indicator, but a
+        blind user never has to hunt for it.
+  \item \textbf{iOS audio unlock.} iOS enforces audio policy at two independent
+        layers, and TTS clips arrive well outside any user gesture. The queue
+        therefore primes \emph{both} inside the Start tap: it resumes a Web Audio
+        context and plays a programmatically constructed silent WAV through one
+        persistent \texttt{<audio>} element --- which is then reused, by swapping
+        its source, for every subsequent MP3 clip. A fresh audio element per clip
+        is silently rejected on iPhone; the persistent primed element is what
+        makes the voice channel work at all on iOS Safari and Chrome.
+  \item \textbf{Sequential playback.} Clips are queued and played one at a time
+        through that element; nothing ever overlaps on the client side.
+  \item \textbf{Sensor permissions inside the gesture.} iOS 13+ requires motion
+        and orientation permission requests from inside a user gesture, so both
+        monitors start from the Start button's click handler; either failing is
+        non-fatal (the server falls back to plain debouncing and the compass-less
+        scan respectively). Motion is classified from a one-second window of
+        accelerometer deviation into still / moving / walking and sent only on
+        state change.
+  \item \textbf{No stale code.} The backend serves the frontend with
+        no-cache headers, because mobile Safari's aggressive JS caching silently
+        reintroduced already-fixed bugs during development.
+  \item \textbf{Local speech fallback.} Browser speech synthesis is used only
+        where the server cannot speak --- camera permission failures before the
+        socket opens, and unexpected disconnections mid-session.
+\end{itemize}
 
 \section{Deployment}
 \label{sec:deployment}
 
-The backend serves the frontend same-origin, so a single HTTPS endpoint exposes the
-whole system. For development and demos, a Cloudflare quick tunnel provides a real
-HTTPS URL in one command --- necessary because browsers permit camera and
-microphone access only over HTTPS (or localhost):
+The backend serves the frontend same-origin, so a single HTTPS endpoint exposes
+the whole system, and the page derives its WebSocket URL from its own origin ---
+the same code works on localhost, behind a tunnel, or on a cloud host. For
+development and demos, a Cloudflare quick tunnel provides a real HTTPS URL in one
+command --- necessary because browsers permit camera and microphone access only
+over HTTPS (or localhost):
 
 \begin{lstlisting}
 cd backend && uvicorn main:app --port 8000
 cloudflared tunnel --url http://localhost:8000
 \end{lstlisting}
 
-The phone opens the printed URL; no certificates, DNS, or router configuration are
-involved. The heavyweight models load lazily on first use (or eagerly via the
-preload flag); the custom door detector and verifier weights are committed to the
-repository so a fresh clone runs the complete system.
+The phone opens the printed URL; no certificates, DNS, or router configuration
+are involved. Table~\ref{tab:models} inventories every model the system uses,
+its size, its provenance, and when it loads. Public weights are fetched and
+cached automatically on first use; the two custom door models are committed to
+the repository, so a fresh clone reaches the complete working system with the
+two commands above and no manual asset steps.
+
+\begin{table}[!htbp]
+\centering
+\caption[Model inventory]{Model inventory: size, source, and load time.}
+\label{tab:models}
+\small
+\begin{tabular}{p{4.1cm} l p{2.6cm} p{4.3cm}}
+\toprule
+\textbf{Model} & \textbf{Size} & \textbf{Source} & \textbf{Loaded} \\
+\midrule
+Whisper base (CTranslate2) & ${\sim}150$\,MB & HuggingFace & first transcription \\
+YOLOv8n (COCO) & ${\sim}6$\,MB & Ultralytics CDN & first detection \\
+MediaPipe HandLandmarker & ${\sim}10$\,MB & Google CDN & first reach phase \\
+YOLOv8m (COCO) & ${\sim}50$\,MB & Ultralytics CDN & first navigation task \\
+Door detector (YOLOv8n, 1 class) & committed & this project & first navigation task \\
+Door verifier (YOLOv8s, 4 classes) & committed & this project & first navigation task \\
+SegFormer-B0 (ADE20K) & ${\sim}15$\,MB & HuggingFace & first navigation task; optional \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Test Infrastructure}
 \label{sec:test_infrastructure}
 
-All decision logic is written as pure, clock-injected code: trackers and controllers
-receive detections, timestamps, and tick durations as arguments and return actions
-and phrases --- no I/O, no models, no global clock. This is what makes the 286-test
-suite possible: FSM transitions, command parsing across 50+ realistic transcriptions
-(including mishearings), spatial bucketing with per-class priors, reach-guidance
-state transitions, the Object Allocation tracker end-to-end with scripted frames and
-a fake clock, the navigation goal model and arrival rules, the compass/bearing
-mathematics (including the $\pm180^\circ$ seam), and complete scripted navigation
-journeys --- scan, door choice, approach, obstacle preemption, doorway transit, new
-room, semantic arrival --- run entirely from faked perception. The suite avoids
-loading any ML model and completes in under one second, so it runs on every change.
-Heavy perception (the door funnel against real pixels) is validated by the live
-trials of Chapter~\ref{ch:evaluation}.
+All decision logic is written as pure, injectable code: trackers and controllers
+receive detections, frame shapes, timestamps, and sensor readings as arguments and
+return actions and phrases --- no I/O, no models, no global clock. This is what
+makes the automated suite possible: \textbf{281 collected test cases} across 13
+modules (Table~\ref{tab:tests}), covering FSM transitions (valid, invalid, and
+no-op, with subscriber semantics); command parsing across 50+ realistic
+transcriptions including mishearings, synonyms, filler, and the completion,
+cancel, and information vocabularies; spatial bucketing with per-class priors and
+boundary cases; guidance phrase rendering; the reach-guidance state machine
+including the dominant-axis rule and degenerate inputs; hand-landmark conversion;
+YOLO detection parsing; the Object Allocation tracker end-to-end with scripted
+frames and a fake clock (temporal filtering, debounce, throttles,
+scan/lost/timeout edges, reach entry and the once-only touch exit); the
+navigation goal model and arrival rules; the compass and bearing mathematics
+including clustering across the $\pm180^\circ$ seam; and complete scripted
+navigation journeys --- a full 36-heading compass scan, door selection from
+clustered bearings, the guided turn, the call-out and path-clear verdict, the
+at-door instruction, doorway transit gated on camera motion, the new room's scan,
+directed indicator confirmation, and the arrival line naming the observed
+evidence --- with the exact mode transitions and key phrases asserted at every
+step. Session-isolation tests verify that concurrent \texttt{NavState} instances
+share nothing.
+
+\begin{table}[!htbp]
+\centering
+\caption[Test suite composition]{Automated test suite composition (cases as
+collected by pytest).}
+\label{tab:tests}
+\small
+\begin{tabular}{l r p{6.6cm}}
+\toprule
+\textbf{Module} & \textbf{Cases} & \textbf{Subject} \\
+\midrule
+\texttt{test\_command\_parser}        & 56 & task commands, mishearings, synonyms, filler \\
+\texttt{test\_navigation\_goals}      & 27 & aliases, indicators, the arrival rule \\
+\texttt{test\_command\_completion}    & 27 & confirm/cancel vocabulary and guards \\
+\texttt{test\_fsm}                    & 26 & every transition, rejection, and subscriber \\
+\texttt{test\_spatial\_reasoning}     & 23 & regions, per-class priors, boundaries \\
+\texttt{test\_reach\_guidance}        & 23 & touch geometry, dominant axis, degenerate input \\
+\texttt{test\_command\_info}          & 22 & describe/repeat vocabulary and guards \\
+\texttt{test\_navigation\_geometry}   & 20 & bearings, clustering, the $\pm180^\circ$ seam \\
+\texttt{test\_guidance\_generator}    & 19 & every phrase template \\
+\texttt{test\_object\_allocation}     & 17 & the tracker end-to-end, fake clock \\
+\texttt{test\_navigation\_controller} &  8 & scripted multi-room journeys \\
+\texttt{test\_yolo\_service}          &  7 & detection parsing (no torch) \\
+\texttt{test\_hand\_service}          &  6 & landmark-to-pose conversion \\
+\midrule
+\textbf{Total} & \textbf{281} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The suite deliberately loads no ML model --- perception results are faked at the
+same interfaces the engines use --- and completes in under one second, so it runs
+on every change. The heavy perception itself (the door funnel against real
+pixels) is what the live trials of Chapter~\ref{ch:evaluation} address.

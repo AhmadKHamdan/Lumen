@@ -4,79 +4,147 @@
 \chapter{Task Families and Algorithms}
 \label{ch:task_families}
 
-This chapter details the three task families. Throughout, a common structure recurs:
-a perception stage that turns frames into \emph{trusted} detections, a pure decision
-layer that turns detections into guidance, and a speech policy that decides what
-actually reaches the user's ears. The perception stages differ per task; the
-philosophy --- nothing unverified is ever spoken --- does not.
+The system organizes all assistance into \textbf{two task families}:
+\emph{Object Allocation}, which finds a requested object and guides the user all
+the way to grasping it, and \emph{Navigation}, which guides the user to a
+destination room through goal-directed exploration. Every capability the user can
+invoke resolves into one of these two: hand-relative \emph{reach guidance} is the
+terminal phase of an Object Allocation task, and the \emph{information queries}
+(``describe'', ``repeat'') are auxiliary services built on the Object Allocation
+perception stack. This chapter details both families as implemented. Throughout, a
+common structure recurs: a perception stage that turns frames into \emph{trusted}
+detections, a pure decision layer that turns detections into guidance, and a speech
+policy that decides what actually reaches the user's ears. The perception stages
+differ per family; the philosophy --- nothing unverified is ever spoken --- does
+not.
 
 \section{Object Allocation}
 \label{sec:object_allocation}
 
-Object Allocation answers ``find my cup''. Its loop runs at 5\,FPS over the
-session's frame stream.
+Object Allocation answers ``find my cup''. When the session FSM enters
+ObjectAllocationActive, an asynchronous loop starts, running at 5\,FPS over the
+session's frame stream until the task completes, is cancelled, or times out. The
+task progresses through two guidance regimes governed by a single tracker:
+\emph{body-relative} guidance while the object is beyond reach (direction and
+distance cues that move the user), and \emph{hand-relative} reach guidance once the
+object is at arm's length and the user's hand is visible (cues that move the hand).
+The hand-off between the two is automatic and reversible.
 
 \subsection{Detection and Temporal Filtering}
 
-Each frame passes through YOLOv8n restricted to the requested class, with a 0.35
-confidence floor. Raw per-frame detections are too flickery to speak: a
-\emph{temporal-consistency filter} requires the target to appear in at least 3 of
-the last 5 frames before it is trusted, killing single-frame false positives. When
-multiple instances are visible (two chairs), guidance targets the most head-on one
---- the box whose centre is closest to the frame centre.
+Each frame passes through YOLOv8n with inference restricted to the requested COCO
+class and a 0.35 confidence floor. Raw per-frame detections are too flickery to
+speak: a \emph{temporal-consistency filter} over a sliding window of the last five
+frames requires the target to be present in at least three of them before it is
+trusted, killing single-frame false positives. When multiple instances are visible
+(two chairs), guidance targets the most head-on one --- the box whose horizontal
+centre is closest to the frame centre.
 
 \subsection{Spatial Reasoning with Per-Class Size Priors}
-\label{sec:spatial_reasoning}
+\label{sec:spatial_reasoning_task}
 
 The trusted box is classified into a horizontal region --- left / center / right,
-split at 0.35 and 0.65 of frame width --- and a distance bucket. Distance uses
-the larger of the box's width and height fractions, compared against
-\emph{per-class thresholds}: a laptop at 40\% of frame width is near, a cup at 18\%
-is equally near, a phone at 12\% likewise --- same arithmetic, three correct
-answers, because the priors encode real object sizes. Bucket transitions are
-debounced (two consecutive frames of the same bucket) so YOLO's box jitter at a
-threshold cannot fire three contradictory phrases in a second; when the client's
-motion monitor reports that the user is actually moving, the debounce is bypassed so
-guidance keeps up with real position changes.
+split at 0.35 and 0.65 of frame width --- and a distance bucket. Distance uses the
+larger of the box's width and height fractions (so both wide and tall objects are
+handled), compared against a \emph{per-class near-at-arm's-reach threshold}: a
+laptop at 40\% of frame width is near, a cup at 18\% is equally near, a phone at
+12\% likewise --- same arithmetic, three correct answers, because the priors encode
+real object sizes. The ratio of observed apparent size to the class threshold
+determines the bucket: at or above 0.85 of the threshold the object is \emph{near};
+at or below 0.35 it is \emph{far}; otherwise \emph{medium}. Classes without an
+explicit prior fall back to a book-sized default. (The complete prior table is
+given in Chapter~\ref{ch:implementation}, Table~\ref{tab:priors}.)
+
+Bucket transitions are debounced --- two consecutive frames of the same
+(region, distance) pair are required before the ``official'' bucket switches --- so
+YOLO's box jitter at a threshold boundary cannot fire three contradictory phrases
+in under a second. The debounce exists to filter jitter while the user is still,
+not to hide real movement: when the client's motion monitor reports that the user
+has started moving, the smoothed state is reset and new buckets are accepted
+immediately, so guidance keeps up with actual position changes.
 
 \subsection{Guidance Policy}
 
 The tracker speaks on first sighting (``Found your cup, to your left''), on bucket
 changes (``Your cup is straight ahead, a few steps away''), and re-affirms unchanged
-guidance at most every 6\,s. Edge cases have explicit behaviors: never seen within
-30\,s produces periodic scan prompts (``I don't see your cup yet, slowly turn
-around''); a target that vanishes for a full temporal window produces a one-shot
-loss announcement including its last known direction; never seen within 60\,s aborts
-the task with an apology. Completion is user-driven (``got it'') --- with one
-exception, below.
+guidance at most every 6\,s. Edge cases have explicit behaviors:
 
-\section{Reach Guidance}
+\begin{itemize}[nosep]
+  \item \textbf{Never seen yet:} a periodic scan prompt every 8\,s --- ``I don't
+        see your cup yet. Slowly turn around so I can look.'' The first prompt is
+        delayed by a full interval so it does not talk over the ``Looking for your
+        cup'' confirmation at task start.
+  \item \textbf{Seen, then lost} for a full five-frame window: a one-shot loss
+        announcement including the last known direction --- ``I lost sight of your
+        cup. It was to your left.''
+  \item \textbf{Never seen within 60\,s:} the task aborts with ``I couldn't find
+        your cup. Stopping the search.''
+\end{itemize}
+
+Completion is user-driven --- the user says ``got it'' and the task ends with a
+closing phrase naming the object --- with one exception, produced by the reach
+phase described next.
+
+\subsection{The Reach Guidance Phase}
 \label{sec:reach_guidance}
 
-When the target's distance bucket is \emph{near} and MediaPipe detects a hand in
-frame, guidance switches from body-relative to \emph{hand-relative} cues. MediaPipe
-runs only in this phase --- invoking it earlier would waste computation while the
-target is across the room.
+When the target's smoothed distance bucket is \emph{near} and MediaPipe detects a
+hand in frame, guidance switches from body-relative to \emph{hand-relative} cues.
+MediaPipe is only invoked once the tracker classifies the target as near ---
+running it earlier would waste roughly 15\,ms per frame while the target is still
+across the room.
 
 The controlling quantity is the offset between the index fingertip and the target
-box centroid, normalized by frame size. Three states result: \emph{approach}
-(directional cues: ``Move your hand to the right'', ``Raise your hand up''),
-\emph{almost} (fingertip within 10\% of the target centroid: ``Almost there. Reach
-forward.''), accompanied by a short haptic pulse, and \emph{touching} (fingertip
-inside the target box): ``Your hand is on the cup. Grasp it,'' with a long haptic
-pulse. Touching is the single autonomous success exit in the whole system --- it
-fires \texttt{task\_complete} without user confirmation, because the fingertip on
-the object \emph{is} the confirmation. A grace period keeps the system in reach mode
-across momentary hand-detection dropouts, preventing oscillation between guidance
-modes at 5\,FPS.
+box centroid. Three states result:
+
+\begin{itemize}[nosep]
+  \item \emph{approach} --- directional cues along the dominant axis: ``Move your
+        hand to the right'', ``Move your hand up''. The dominant axis is chosen by
+        \emph{pixel} magnitude rather than frame-fraction, because the frame is
+        wider than it is tall and fractional comparison systematically biased cues
+        toward the vertical axis.
+  \item \emph{almost} --- fingertip within 15\% of the frame from the target
+        centroid on both axes: ``Almost there. Reach forward,'' accompanied by a
+        short haptic pulse on entry into this state.
+  \item \emph{touching} --- fingertip inside the target's bounding box: ``Your hand
+        is on the cup. Grasp it,'' with a long haptic pulse.
+\end{itemize}
+
+Touching is the single autonomous success exit in the whole system --- it fires
+the \texttt{task\_complete} event without user confirmation, because the fingertip on the
+object \emph{is} the confirmation, and it is emitted at most once per task. Reach
+cues are throttled: an unchanged (state, direction) pair is re-spoken at most every
+5\,s. A 3\,s grace period keeps the system silent (rather than reverting to
+body-direction guidance) across momentary hand-detection dropouts, preventing the
+two guidance regimes from alternating at 5\,FPS on hand-detection flicker; leaving
+reach mode clears the throttle key so re-entering later is announced fresh.
+
+\subsection{Information Queries}
+\label{sec:info_queries}
+
+Two voice queries, built directly on the Object Allocation perception stack, are
+available at any time and never change task state. \textbf{``Describe''} (``what
+do you see'', ``what's in front of me'') runs YOLOv8n over the current frame at a
+raised 0.5 confidence floor --- only things the system is reasonably sure about are
+worth mentioning to a user with no visual cross-check --- and reads back up to the
+four highest-confidence detections with their regions, classified by the same
+spatial-reasoning module the search loop uses: ``I see a laptop straight ahead, a
+cup on your left, and a chair on your right.'' \textbf{``Repeat''} (``say that
+again'') replays the last spoken guidance phrase, which the session records on
+every utterance; the replay itself does not overwrite the record, so repeating
+twice replays the same phrase.
 
 \section{Navigation: Goal-Directed Exploration}
 \label{sec:navigation}
 
-Navigation is the deepest task family. The user names only a destination room; the
+Navigation is the deeper task family. The user names only a destination room; the
 system explores toward it with no map, no markers, and no localization --- the
 design bet is that \emph{semantic room recognition} plus \emph{door detection} plus
-\emph{occasional human hints} can substitute for the SLAM a phone camera cannot do.
+the user's own physical turning, tracked by compass, can substitute for the SLAM a
+phone camera cannot do. The navigation loop runs at 3\,FPS --- its models are
+heavier than Object Allocation's --- and the first navigation task in a server's
+lifetime loads them with a spoken ``Give me a moment while I get ready'' rather
+than going silent.
 
 \subsection{Destination Model and Semantic Arrival}
 \label{sec:goals_model}
@@ -87,13 +155,20 @@ shown in Table~\ref{tab:goal_indicators}. Arrival is declared when at least one
 primary or at least two secondary indicators are confirmed --- so a lone sink never
 declares a kitchen (bathrooms have sinks), but a refrigerator does. All indicators
 are COCO classes, so the stock detector produces them with no additional training.
+Spoken destinations resolve through an alias table (``washroom'', ``restroom'',
+``loo'' $\to$ bathroom; ``lounge'', ``den'' $\to$ living room; \ldots) with a
+longest-alias substring fallback, so ``take me to the master bedroom'' still
+resolves to \emph{bedroom}; a destination that resolves to nothing ends the task
+with a spoken list of the rooms the system does know.
 
 \begin{table}[H]
 \centering
-\caption[Destination rooms and indicator objects]{Destination rooms and their indicator objects (all COCO classes). Arrival
-requires ${\geq}1$ primary or ${\geq}2$ secondary indicators, temporally confirmed.}
+\caption[Destination rooms and indicator objects]{Destination rooms and their
+indicator objects (all COCO classes). Arrival requires ${\geq}1$ primary or
+${\geq}2$ secondary indicators, temporally confirmed.}
 \label{tab:goal_indicators}
-\begin{tabular}{lll}
+\small
+\begin{tabular}{p{2.4cm} p{6.0cm} p{4.2cm}}
 \toprule
 \textbf{Goal} & \textbf{Primary indicators} & \textbf{Secondary indicators} \\
 \midrule
@@ -108,9 +183,10 @@ dining room  & dining table                            & chair \\
 \end{table}
 
 Indicator evidence is deliberately \emph{localized}: during a room scan, a class is
-confirmed only when enough sightings fall within one $90^\circ$ window. A real
-fridge racks up its sightings in one spot as the camera sweeps past; detector noise
-scatters around the room and can never sum to an arrival.
+confirmed only when at least four sightings fall within one $90^\circ$ window (a
+$30^\circ$ sector plus its two neighbours). A real fridge racks up its sightings in
+one spot as the camera sweeps past; detector noise scatters around the room and can
+never sum to an arrival.
 
 \subsection{The Door Detector}
 \label{sec:door_model}
@@ -120,15 +196,17 @@ were merged and reduced to a single \texttt{door} class: DoorDetect
 \cite{arduengo2021door} (386 door images plus 827 hard negatives --- handles and
 cabinets --- that teach the model what a door is \emph{not}) and DeepDoors2
 \cite{ramoa2021deepdoors} (3{,}000 images with 3{,}106 door boxes, converted from
-segmentation masks), for a combined 4{,}213 images split 80/20 into 3{,}371 training
+segmentation masks by thresholding the mask colour and taking connected-component
+bounding boxes), for a combined 4{,}213 images split 80/20 into 3{,}371 training
 and 842 validation images. A YOLOv8n was fine-tuned from COCO-pretrained weights
 (319 of 355 layers transferred) at $640$ input resolution, batch 8, AdamW; the best
 checkpoint (epoch 39) achieves \textbf{mAP@50 $= 0.946$}, mAP@50--95 $= 0.829$,
 precision $0.968$, and recall $0.892$ --- comfortably above the ${\geq}0.6$ mAP@50
-target set for the milestone. A second, 4-class model (door / handle / cabinet door
-/ refrigerator door) was trained on the original DoorDetect labels; its recall is
-too low to detect doors alone, but that is not its job --- it serves as a
-\emph{semantic verifier}, below.
+target set for the milestone. A second, 4-class YOLOv8s model (door / handle /
+cabinet door / refrigerator door) was trained on the original DoorDetect labels;
+its recall is too low to detect doors alone, but that is not its job --- it serves
+as a \emph{semantic verifier}, below. Both trained weight files are committed to
+the repository so a fresh clone runs the complete system.
 
 \subsection{The Three-Layer Door Perception Funnel}
 \label{sec:door_funnel}
@@ -136,8 +214,8 @@ too low to detect doors alone, but that is not its job --- it serves as a
 A false door is the most dangerous percept in the system --- it points a blind user
 at a wall, a curtain, or a refrigerator. Raw detector confidence cannot prevent
 this: in live testing, blank walls scored as doors at 0.9 confidence. Every door
-candidate therefore descends a three-layer funnel (Figure~\ref{fig:door_funnel}),
-each layer motivated by a specific observed failure.
+candidate above the 0.45 confidence floor therefore descends a three-layer funnel
+(Figure~\ref{fig:door_funnel}), each layer motivated by a specific observed failure.
 
 \begin{figure}[H]
 \centering
@@ -145,23 +223,25 @@ each layer motivated by a specific observed failure.
 \begin{tikzpicture}[node distance=5mm]
   \node[box, minimum width=118mm] (cand) {Door model candidates (conf $\geq 0.45$)};
   \node[box, minimum width=118mm, below=of cand] (geo)
-    {\textbf{Layer 1 --- geometric gates:} aspect ratio $\leq 1.4$ (wall spans);
-     frame-fill $\leq 0.80$ during scan (whole-scene latches);\\
-     Canny edge density (blank walls) --- smooth candidates \emph{demoted}, not dropped};
+    {\textbf{Layer 1 --- geometric gates:} width/height ratio $\leq 1.4$ (wall spans);
+     frame-fill $\leq 0.80$ during the scan (whole-scene latches);\\
+     Canny edge density of the box interior (blank walls) --- smooth candidates
+     \emph{demoted}, not dropped};
   \node[box, minimum width=118mm, below=of geo] (sem)
     {\textbf{Layer 2 --- semantic verification (4-class model):} strong textured
-     candidates pass alone;\\ weak or smooth candidates require corroboration ---
-     verifier sees a \emph{door} or a \emph{handle} there\\ (kills curtains);
-     verifier's \emph{refrigerator door} without door evidence vetoes};
+     candidates (conf $\geq 0.60$) pass alone;\\ weak or smooth candidates require
+     corroboration --- the verifier sees a \emph{door} there (IoU $\geq 0.40$) or a
+     \emph{handle} inside the box\\ (kills curtains); a verifier \emph{refrigerator
+     door} without door evidence vetoes the candidate};
   \node[box, minimum width=118mm, below=of sem] (arb)
     {\textbf{Layer 3 --- fridge arbitration:} a COCO ``refrigerator'' overlapping a
      door candidate\\ is kept only if the verifier confirms a refrigerator door ---
      otherwise it \emph{is} the door\\ (prevents false kitchen arrivals from
      door-as-fridge confusions)};
   \node[box, minimum width=118mm, below=of arb] (rel)
-    {\textbf{Reliability gates:} $\geq 3$ sighting units before a door is spoken or
-     targeted\\ (verifier-corroborated frames count double); 2-of-3 temporal
-     confirmation per frame};
+    {\textbf{Reliability gates:} 2-of-3 temporal confirmation per frame; $\geq 3$
+     sighting units during a scan before a door is spoken or targeted\\
+     (a verifier-corroborated frame counts double)};
   \draw[arr] (cand) -- (geo);
   \draw[arr] (geo) -- (sem);
   \draw[arr] (sem) -- (arb);
@@ -173,26 +253,50 @@ a lace curtain that beat every geometric gate, and doors misread as refrigerator
 \label{fig:door_funnel}
 \end{figure}
 
-One subtlety deserves emphasis: edge density is \emph{not} a hard reject. A plain
-door in dim light is as smooth as a wall (both ${\sim}0.01$ edge fraction), and
-confidence cannot break the tie (walls reach 0.9). Smooth candidates are instead
-demoted to require semantic proof --- only the verifier seeing a door or a handle
-there can pass them. This is what finally separated the lace curtain (edge-rich,
-tall, door-sized, defeats all geometry) from real doors: curtains have no handles.
+Several subtleties deserve emphasis. First, edge density is \emph{not} a hard
+reject. A plain door in dim light is as smooth as a wall (both around 0.01 edge
+fraction), and confidence cannot break the tie (walls reach 0.9). Smooth candidates
+are instead demoted to require semantic proof --- only the verifier seeing a door
+or a handle there can pass them. This is what finally separated the lace curtain
+(edge-rich, tall, door-sized, defeats all geometry) from real doors: curtains have
+no handles. Second, the verifier's fridge veto applies only when it saw fridge
+evidence \emph{without} door evidence at the same spot --- the verifier
+hallucinates ``refrigerator door'' on real doors too, and vetoing frames it
+simultaneously corroborated kept breaking detection streaks on the actual door.
+Third, a vetoed door never becomes fridge evidence: the verifier also hallucinates
+``refrigerator door'' on blank walls, and feeding those into arrival evidence
+produced fake fridges; real fridges must be detected by the COCO model on its own.
+Fourth, fridge arbitration is suspended during the directed indicator confirmation
+phase, when the user is deliberately pointing the camera at an appliance and the
+door model routinely fires on real fridges --- without the exemption, the
+arbitration starved the confirmation of the very fridge sightings it was checking
+for. Finally, where a surviving door box and a COCO object box still overlap
+heavily (IoU $\geq 0.5$), only the higher-confidence claim is kept, eliminating
+door/refrigerator double-claims.
+
+The whole-frame gate is applied to COCO objects too: while the user stands
+mid-room scanning or confirming, a ``refrigerator'' boxed edge-to-edge is a wall
+latch and a fake kitchen indicator --- a direct path to a false arrival --- so
+whole-scene object boxes are rejected in those phases. During the close door
+approach, where filling the frame is legitimate, the gate is lifted.
 
 \subsection{The Compass-Anchored Room Scan}
 \label{sec:room_scan}
 
 On entering a room (and at journey start), the system requests one slow full turn:
-``Slowly turn to your right, all the way around, until you are facing where you
-started.'' The first compass heading is locked as the anchor --- ``ahead'' means
-where the scan began --- and every subsequent detection is filed by true bearing:
+``Looking for the kitchen. Let's scan the room --- slowly turn to your right, all
+the way around, until you are facing where you started.'' The goal echo is folded
+into this instruction rather than spoken separately, so it cannot be cut off. The
+first compass heading is locked as the anchor --- ``ahead'' means where the scan
+began --- and every subsequent detection is filed by true bearing:
 $\text{bearing} = \text{camera heading} + (x_{\text{frame}} - 0.5)\cdot
 \text{FOV}$, the in-frame correction fixing a class of ``said left, was right''
-errors. Sightings are accumulated into $12 \times 30^\circ$ sectors, and door
-bearings are \emph{clustered} (sightings within $30^\circ$ merge, including across
-the $\pm180^\circ$ seam) so one physical door is announced once, with one precise
-heading.
+errors. Sightings are accumulated into $12 \times 30^\circ$ sectors, and door and
+indicator bearings are \emph{clustered} (sightings within $30^\circ$ merge,
+including across the $\pm180^\circ$ seam) so one physical door is announced once,
+with one precise heading. Indicator sightings record their class alongside the
+bearing, so a later prompt can name what was seen (``I noticed a fridge on your
+left''), not just point vaguely.
 
 Scan completion requires \emph{both} ${\sim}350^\circ$ of accumulated rotation
 \emph{and} a compass-confirmed return to within $25^\circ$ of the start heading. An
@@ -200,11 +304,20 @@ earlier design that ended on sector coverage alone could be faked by compass noi
 mid-turn, ending the scan while the user faced the wrong way --- and every spoken
 direction would then be computed from a broken premise. With the current rule, the
 directions in the scan summary (``I found a door behind you, to the right'') are
-true at the moment they are heard. A motion gate skips detection on blurred frames
-while the phone pans too fast (coaching ``slow down'' only after several consecutive
-fast frames), but keeps advancing the rotation total so a fast sweep cannot stall
-completion. Without a compass (e.g., a laptop), the scan falls back to a single
-timed steady pass with no bearing summaries.
+true at the moment they are heard; if the rotation total is complete but the user
+has not yet returned to the start heading, the system nudges (``Almost done ---
+keep turning until you face where you started''). During the turn, exactly two
+gentle progress nudges are spoken --- at $90^\circ$ and $270^\circ$ of rotation ---
+with deliberately different wordings so ambient de-duplication does not swallow the
+second.
+
+A motion gate skips detection on blurred frames while the phone pans too fast
+(frame-difference above a tuned threshold), coaching ``Slow down. Move the phone
+slowly'' only after three consecutive fast frames --- a single blurred frame is an
+autofocus hunt, not the user rushing --- while still advancing the rotation total so
+a fast sweep cannot stall completion. Without a compass (a laptop, or permission
+denied), the scan falls back to a single steady-pan pass over a fixed number of
+usable frames, with no bearing summaries.
 
 \subsection{The Exploration Controller}
 \label{sec:exploration_controller}
@@ -220,13 +333,13 @@ timed steady pass with no bearing summaries.
   \node[state, minimum width=27mm, right=14mm of godoor] (goind) {\textbf{go\_indicator}\\directed re-confirmation};
 
   \draw[arr] (disc) -- node[lbl, right]{strong indicators\\(after directed check)} (arr.north);
-  \draw[arr] (disc) -- node[lbl, left]{door chosen /\\weak indicator} (face);
+  \draw[arr] (disc) -- node[lbl, left]{door chosen /\\indicator sighted} (face);
   \draw[arr] (face) -- node[lbl, left]{facing door} (godoor);
   \draw[arr] (face) -- node[lbl, above right=0 and -6mm]{facing sighting} (goind);
   \draw[arr] (goind) -- node[lbl, right]{confirmed} (arr);
   \draw[arr] (goind) to[bend right=18] node[lbl, above]{not confirmed:\\take door / rescan} (face);
   \draw[arr] (godoor.west) to[bend left=40] node[lbl, left]{doorway transit\\$\rightarrow$ new room} (disc.west);
-  \draw[arr] (godoor) to[bend right=25] node[lbl, below]{door lost 12\,s\\$\rightarrow$ rescan} (disc.south east);
+  \draw[arr] (godoor) to[bend right=25] node[lbl, below]{door lost ${\sim}12$\,s\\$\rightarrow$ rescan} (disc.south east);
 \end{tikzpicture}}
 \caption[Navigation controller state machine]{The navigation controller's internal state machine (nested inside the
 session FSM's NavigationActive state). Priority is absolute: confirmed indicators
@@ -237,96 +350,201 @@ looking for.}
 
 The controller (Figure~\ref{fig:nav_controller}) implements a two-phase principle:
 Phase~1 scans silently and collects evidence; Phase~2 acts on that evidence by
-priority. Strong indicator evidence still receives a \emph{directed double-check} ---
-the user is turned toward the sightings and the system re-confirms before declaring
-arrival, so a scan artifact alone never ends a journey. Weak indicator sightings get
-the same directed confirmation, and fall back to the door branch if unconfirmed.
-When only doors were found, the most-sighted door (tie-broken toward straight ahead)
-becomes the target; the user is rotated to face it using live compass differences,
-then guided in. If nothing useful was found, the room is rescanned --- and all such
-announcements are merged into single utterances so instructions never collide.
+priority. At scan end, the branches are evaluated strictly in order:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Strong indicator evidence} (the localized arrival bar was met)
+        still receives a \emph{directed double-check}: ``I've seen signs of the
+        kitchen on your right. Turn that way, and let's make sure we've reached
+        it.'' The user is rotated toward the densest sighting cluster and the
+        system re-confirms there before declaring arrival, so a scan artifact
+        alone never ends a journey. (Without usable bearings --- no compass ---
+        the confirmation is undirected: ``keep panning slowly.'')
+  \item \textbf{Weak indicator sightings} (glimpsed, but below the arrival bar)
+        get the same directed confirmation, naming the most-sighted class in the
+        cluster: ``I noticed a fridge on your left. Let's double-check --- turn
+        that way and point the camera at it.'' Indicator priority holds: this
+        branch runs before doors are considered.
+  \item \textbf{Doors:} a single confirmed door cluster becomes the target
+        directly: the user is rotated to face it, then guided in. When several
+        clusters survive the sighting minimum, the multi-door dialogue of
+        Section~\ref{sec:multi_door} chooses among them --- by the user's spoken
+        hint when one is given, by proximity straight ahead otherwise. Clusters
+        below the sighting minimum are flickers, never targets. If the
+        scan summary named exactly one finding --- this door --- the door is not
+        announced twice.
+  \item \textbf{Nothing useful:} the room is rescanned, with the announcement and
+        the fresh scan instruction merged into a single utterance so instructions
+        never collide.
+\end{enumerate}
+
+The directed confirmation (\texttt{go\_indicator}) uses a lower evidence bar than
+the scan --- three sightings per class rather than four --- because it is a
+re-check of evidence the scan already flagged, followed by a short settle window so
+that neighbouring indicators (the fridge right next to the oven) cross the bar too
+and the arrival line names \emph{all} of them: ``I can see a fridge and an oven ---
+we've reached the kitchen.'' If confirmation fails within its window
+(${\sim}10$\,s), the indicator had its chance: if the scan also flagged a door, the
+system takes it (``I couldn't confirm the kitchen here. Let's take the door
+instead''); otherwise a full rescan begins.
+
+The guided turn (\texttt{face\_target}) computes the signed turn from the live
+compass heading to the target's stored absolute heading. The scan-end announcement
+already said which way to turn, so the turn itself is silent --- a re-instruction
+in different words reads as two contradictory commands --- with a sparing nudge
+(``Turn slowly to your right to face the door'') only if the user has still not
+faced the target after several seconds. On facing it (within $25^\circ$), the
+handoff is silent in both branches: the very next line is the one-shot door
+call-out or the arrival itself, and a filler sentence would still be playing when
+it arrives.
+
+In \texttt{go\_door}, if the door cannot be re-confirmed for ${\sim}12$\,s of
+observed frames, the flag is treated as stale and a full rescan begins (``I can't
+find that door anymore\ldots''), with rotating ambient nudges (``Still looking for
+a door. Keep moving the camera around the room.'') in the meantime.
 
 \subsection{Door Approach: Distance in Steps}
 \label{sec:door_distance}
 
 Door distance uses a pinhole model over the door's known height: with doors
-${\sim}2$\,m tall and the focal length derived from the camera's field of view,
-$d = h_{\text{real}} \cdot f_{\text{px}} / h_{\text{px}}$. Two corrections came from
-live testing: the focal length must be derived from the image's \emph{long} side
-(phones stream portrait; using width understated every distance by ${\sim}33\%$),
-and when the verifier also boxed the door, distance is measured on the tighter of
-the two boxes (the primary model's boxes run loose at range, and a fat box reads as
-near). A one-shot calibration constant scales the whole chain from a single
-ground-truth measurement. Distances are spoken in steps (${\sim}0.75$\,m each) with
-a tactile endgame: within three steps, ``reach out with your hand to find the
-door.'' The spoken sequence is strictly ordered --- one call-out stating where the
-door is, then a path check, then either ``the path is clear, walk\ldots'' or an
-obstacle warning --- so safety information always precedes the instruction to move.
+${\sim}2$\,m tall and the focal length derived from an assumed $60^\circ$ field of
+view, $d = h_{\text{real}} \cdot f_{\text{px}} / h_{\text{px}}$. Two corrections
+came from live testing: the focal length must be derived from the image's
+\emph{long} side (a camera's quoted field of view belongs to its wider axis, and
+phones stream portrait; deriving it from the width understated every distance by
+${\sim}33\%$), and when the verifier also boxed the door, distance is measured on
+the tighter (shorter) of the two boxes --- the primary model's boxes run loose at
+range, and a fat box reads as near. The per-frame estimate is steadied by taking
+the median over the temporal confirmation window, and a one-shot calibration
+constant scales the whole chain from a single ground-truth measurement.
+
+Distances are spoken in steps (${\sim}0.75$\,m each) with a tactile endgame: within
+three steps, ``Walk about 2 steps, and reach out with your hand to find it'';
+farther out, ``Walk forward, and after about $N$ steps reach out with your hand.''
+The spoken sequence is strictly ordered: (1) one static call-out stating where the
+door is --- ``The door is on your right, about 4 steps away. Let me check the path
+ahead.'' --- phrased definitely (``The door is'', never ``There's a door'', which
+sounds like a guess, because by this point the door has been confirmed); (2)
+obstacle speech is held for ${\sim}2$\,s so that sentence finishes playing; (3) the
+path verdict follows --- either ``The path is clear,'' plus the walking
+instruction, or the obstacle warning. Safety information always precedes the
+instruction to move.
 
 \subsection{The Obstacle Watchdog}
 \label{sec:obstacles}
 
 Armed only in the walking phase (\texttt{go\_door}) --- the only phase the user
 moves --- the watchdog fuses two layers with absolute speech priority over door
-guidance. \textbf{Layer A (named objects):} during the approach, the COCO detector
-additionally requests obstacle classes (person, chair, table, bags, pets, \ldots);
-any box that sits low in frame, is large enough to matter, and overlaps the central
-walking lane triggers ``There's a chair in your path. Step to your left, where it's
-clear.'' \textbf{Layer B (unnamed clutter):} SegFormer floor segmentation labels
-every pixel; the lane just ahead of the user's feet must remain mostly
-walkable-floor. Something \emph{beside} the path leaves the floor corridor
-continuous (silent); something \emph{in} the path punches a hole in it (warn, with
-the sidestep direction chosen toward the flank with more visible floor). This
-floor-based formulation replaced an earlier relative-depth tripwire
-\cite{yang2024depthanything} that could not reliably separate beside-path from
-in-path objects in cluttered rooms; the depth variant is retained as a configurable
-alternative. Both layers are debounced (three consecutive frames to warn, two clear
-frames to release), re-warn every ${\sim}3$\,s while blocked, and close with ``Okay,
-the way ahead is clear'' --- followed, in the same utterance, by re-orientation
-toward the door.
+guidance.
+
+\textbf{Layer A (named objects).} During the approach, the COCO detector
+additionally requests a set of obstacle classes (person, chair, couch, bed, table,
+plant, bags, bench, TV, dog, cat). Any box that sits low in frame (bottom below
+62\% of frame height --- on the floor ahead, not hanging in the distance), is large
+enough to matter (at least 18\% of frame height), and overlaps the central walking
+lane (the 30--70\% horizontal band) by at least 10\% of frame width triggers a
+warning naming the object: ``There's a chair in your path. Step to your right,
+where it's clear,'' with the sidestep direction chosen away from the obstacle's
+side of the lane. The minimum-overlap threshold exists because side furniture
+merely grazing the lane edge used to trigger stop warnings.
+
+\textbf{Layer B (unnamed clutter).} COCO has no word for the clutter that actually
+litters floors --- clothes piles, boxes, bins, a standing fan. The question was
+never ``is there an object?'' but ``is the strip of floor I am about to walk on
+clear?'' --- so the class-agnostic signal is \emph{floor segmentation}: SegFormer
+labels every pixel, and the lane just ahead of the user's feet (rows 66--94\% of
+frame height, the central 38--62\% band) must remain at least 60\% walkable ---
+floor, rug, or carpet pixels, plus \emph{door}, since in this phase the door is the
+destination, never an obstacle. Something \emph{beside} the path leaves the floor
+corridor continuous (silent); something \emph{in} the path punches a hole in it
+(warn, as ``something'', with the sidestep direction toward the flank showing more
+visible floor). This floor-based formulation replaced an earlier relative-depth
+tripwire \cite{yang2024depthanything} that could not reliably separate beside-path
+from in-path objects in cluttered rooms; the depth variant is retained in the code
+as a configurable alternative, and if neither auxiliary model is available the
+watchdog degrades gracefully to the named-object layer alone.
+
+Both layers are debounced --- three consecutive blocked frames before the first
+warning, two clear frames before release --- re-warn every ${\sim}3$\,s while
+blocked (``It's still in your path --- step more to your right''), and close with
+``Okay, the way ahead is clear,'' followed, in the same utterance, by
+re-orientation toward the door if it is in sight (two back-to-back priority lines
+would cut each other off). While an obstacle episode is open, a blocking frame
+suppresses door guidance entirely. Once the user is at or through the doorway, the
+floor signal is meaningless (the panel fills the frame) and pauses --- but a person
+stepping into the doorway is still a named YOLO box, so the named layer stays armed
+through the transit.
 
 \subsection{Doorway Transit Detection}
 \label{sec:transit}
 
 Detecting ``the user just walked through'' has no single reliable signal, so the
 system fuses several, each gated by the others. A tracked approach must first get
-\emph{near} the door (metric distance below 2\,m, or the confirmed door having grown
-to fill most of the frame height); then a saturated door-shaped box at arm's length
---- which the edge gate deliberately rejects as a door, since a panel up close is
-smooth --- arms an ``at the door'' latch, but only after consecutive qualifying
-frames (a single loose box mid-sidestep once spoke ``you're at the door'' from two
-meters away). The user hears the full sequence in one utterance: ``You're right at
-the door. Reach out with your hand, open it, walk through the doorway, and take two
-or three steps into the room.'' Transit is then inferred when the door disappears
-from view for ${\sim}2$\,s of observed frames \emph{and} the camera reports
-sustained motion --- the camera is the odometer, and detection flicker without
-movement can never fake a walk-through. A hold cap forces the inference if a new
-room's own door candidates keep the latch alive after the user has clearly moved on.
-On transit, the room counter increments and a fresh scan begins, anchored to the
-user's new heading.
+\emph{near} the door: either the median metric distance dropped below 2\,m, or the
+confirmed door grew to fill at least 80\% of the frame height --- a scale-free
+signal immune to calibration error. Then a saturated door-shaped box at arm's
+length --- which the edge gate deliberately rejects as a confirmed door, since a
+panel up close is smooth --- arms an ``at the door'' latch, but only after two
+consecutive qualifying frames (a single loose box mid-sidestep once spoke ``you're
+at the door'' from two meters away) and never while an obstacle episode is open
+(the episode must close with its all-clear first, or the spoken order contradicts
+itself). Arming the latch speaks the whole door sequence in one utterance ---
+network latency between separate commands would leave the user waiting at the
+door: ``You're right at the door. Reach out with your hand, open it, walk through
+the doorway, and take two or three steps into the room.''
 
-\subsection{Bounded Autonomy: Room Cap and Journey Timeout}
-\label{sec:room_cap}
+Transit is then inferred when the door disappears from view for ${\sim}2$\,s of
+observed frames \emph{and} the camera reports sustained motion --- at least four
+frames of frame-to-frame movement since reaching the door. The camera is the
+odometer: walking produces sustained frame motion, standing still reads near zero,
+and detection flicker without movement can never fake a walk-through; if the
+visual thresholds fire but the user has not moved, the at-the-door instruction is
+gently repeated instead. Far doors glimpsed mid-walk-through belong to the
+\emph{next} room and deliberately do not reset the disappearance counter ---
+letting them reset it once stalled the ``you're through'' announcement by
+${\sim}16$\,s. Finally, a hold cap (${\sim}13$\,s) forces the inference if a new
+room's own saturated door candidates keep the latch alive after the user has
+clearly moved on. On transit, the new room's scan begins immediately, anchored to
+the user's new heading, with the announcement and the scan instruction merged:
+``You're through. Now slowly turn to your right, all the way around\ldots''
 
-Without localization, an exploration in the wrong wing of a building could otherwise
-continue indefinitely. Two mechanisms bound it. After a configurable number of rooms
-(four, then every second room), the transit announcement becomes a check-in:
-``You're through --- that's 4 rooms now and no kitchen yet. Say stop anytime if
-you'd like to give up, or keep going\ldots'' --- informing rather than interrogating,
-since ``stop'' is already honored globally. Independently, a whole-journey timeout
-(five minutes) ends the task with a spoken explanation and an invitation to retry.
-Both keep the user in control of an exploration whose length perception alone cannot
-predict.
+\subsection{Multi-Door Rooms}
+\label{sec:multi_door}
+
+When a scan finds several door clusters, the choice is conversational before it is
+autonomous. The scan summary has already told the user how many doors there are and
+where each one lies (``I found two doors: one ahead, and one on your left''), so
+Lumen follows it with a question rather than a silent decision: if the user knows
+which way the goal lies, they are invited to say so. A one-word answer ---
+``left'', ``right'', ``ahead'', ``behind'' --- is matched against the doors'
+bearings, the corresponding cluster becomes the target, and guidance proceeds
+toward it. The user is treated as a \emph{direction oracle}: someone in their own
+home often knows the way even when they cannot see it, and a spoken word is cheaper
+than any amount of additional perception. If the user does not know --- they say so,
+or simply give no hint --- the system decides for them, taking the door nearest
+straight ahead: the choice that requires the least turning, keeps the camera's
+evidence for it freshest, and is simplest to narrate. Either way the user is never
+stranded on an unanswered question, every door was already named by direction so
+the alternatives are known, and ``stop'' is honored at any moment. Remembering the
+door just entered through --- so the same fork never has to be asked about twice ---
+is a designed extension discussed in Chapter~\ref{ch:future_work}.
 
 \subsection{Speech Discipline}
 \label{sec:speech_discipline}
 
 A blind user cannot glance at a transcript; overlapping or stale audio is a
-functional bug. Three rules are enforced throughout navigation: \emph{priority}
-lines (scan summaries, phase changes, obstacle warnings, arrival) are always spoken;
-\emph{ambient} nudges (keep scanning, distance countdowns) are dropped --- never
-queued --- when speech is already playing, when they repeat too soon, or hot on the
-heels of another line; and announcements that would otherwise be adjacent are merged
-into single utterances, because two back-to-back priority lines would cut each other
-off. The scan-summary sentence exemplifies all three: completion confirmation,
-findings by direction, and the next instruction arrive as one connected utterance.
+functional bug, not a cosmetic one. The navigation engine enforces a two-tier
+policy. \emph{Priority} lines (scan summaries, phase changes, obstacle warnings,
+the at-door sequence, arrival) are always spoken. \emph{Ambient} nudges (keep
+scanning, turn corrections, door-hunt prompts) are dropped --- never queued --- if
+an identical ambient line played within the last 8\,s or if \emph{any} line played
+within the last 2.5\,s: the client plays clips back-to-back, and unthrottled
+ambient chatter would queue up and lag behind reality. Announcements that would
+otherwise be adjacent are merged into single utterances, because two back-to-back
+priority lines would cut each other off; a flag carried across the phase change
+suppresses the next phase's opening instruction when the previous announcement
+already contained it. The scan-summary sentence exemplifies all three rules:
+completion confirmation, findings by direction, and the next instruction arrive as
+one connected utterance --- ``You're back where you started --- scan complete. I
+found a door behind you, to the right. Turn toward it and point your camera at it,
+so I can guide you in precisely.''

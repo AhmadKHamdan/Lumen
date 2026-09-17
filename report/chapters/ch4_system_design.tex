@@ -162,13 +162,13 @@ its previous session id and the server re-fires the task with a spoken
   \node[state, right=72mm of listen] (ret) {Returning\\ToIdle};
 
   \draw[arr] (idle) -- node[lbl, above]{user\_start} (listen);
-  \draw[arr] (listen) -- node[lbl, above left]{command\_recognized\\(find X)} (obj);
-  \draw[arr] (listen) -- node[lbl, below left]{command\_recognized\\(navigate to Y)} (nav);
+  \draw[arr] (listen) -- node[lbl, below right]{command\_recognized\\(find X)} (obj);
+  \draw[arr] (listen) -- node[lbl, above right]{command\_recognized\\(navigate to Y)} (nav);
   \draw[arr] (obj) -- node[lbl, above right]{task\_complete /\\user\_stop} (ret);
   \draw[arr] (nav) -- node[lbl, below right]{task\_complete /\\user\_stop} (ret);
-  \draw[arr] (obj.west) to[bend right=12] node[lbl, above]{task\_abort} (listen.north);
-  \draw[arr] (nav.west) to[bend left=12] node[lbl, below]{task\_abort} (listen.south);
-  \draw[arr] (ret.south) to[bend left=22] node[lbl, below]{cleanup\_done} (idle.south);
+  \draw[arr] (obj.west) to[bend right=12] node[lbl, above left]{task\_abort} (listen.north);
+  \draw[arr] (nav.west) to[bend left=12] node[lbl, below right]{task\_abort} (listen.south);
+  \draw[arr] (ret.south) to[bend left=22] node[lbl, below left]{cleanup\_done} (idle.south);
 \end{tikzpicture}}
 \caption[Session finite state machine]{The session FSM. Every transition is driven by an explicit event; the only
 autonomous transitions are \texttt{cleanup\_done} (one tick after entering

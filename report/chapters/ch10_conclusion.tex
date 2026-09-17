@@ -1,0 +1,58 @@
+% =========================
+% Chapter 10
+% =========================
+\chapter{Conclusion}
+\label{ch:conclusion}
+
+This work set out to answer a specific question: can an assistive system provide
+reliable, context-aware guidance to blind users while minimizing cognitive load, by
+activating perception only for explicit tasks? Lumen answers it constructively. A
+blind user with nothing but an ordinary smartphone and a web address can ask for an
+object and be guided to it, have their hand steered onto it and released with an
+automatic ``grasp it,'' or name a destination room and be walked there
+door-by-door --- with the system silent before the task, disciplined during it, and
+silent again after.
+
+The contributions claimed in Chapter~\ref{ch:introduction} hold up under the
+project's own evaluation. The \emph{task-scoped perception paradigm} is enforced
+structurally rather than by convention: a five-state finite state machine governs
+every session, every transition is an explicit event, and a task engine cannot
+outlive its state --- cancellation, completion, disconnection, and error all funnel
+through the same teardown. \emph{Goal-directed exploration} demonstrates that
+semantic room recognition, door detection, and a compass-anchored $360^\circ$ scan
+can substitute for the localization a phone camera cannot provide, completing
+multi-room journeys with no map, no markers, and no infrastructure. The
+\emph{door perception funnel} shows what safety-grade perception on commodity
+models requires: the custom detector reaches mAP@50 of $0.946$, yet the system
+never acts on it raw --- every spoken door survived geometric gates, semantic
+verification by a second model, and temporal evidence accumulation, a design forged
+failure-by-failure against real rooms. \emph{Zero-install delivery} proved not
+merely convenient but architecturally clarifying: one WebSocket, one server
+process, one URL. And the \emph{testable architecture} kept the whole decision
+layer honest --- 281 automated tests replay complete navigation journeys, safety
+invariants, and fifty voice-command variants in under a second, on every change.
+
+Beyond the artifacts, the project yields a methodological lesson worth stating
+plainly. In assistive perception, the adversary is not the benchmark but the
+world: blank walls that score as doors at 0.9 confidence, lace curtains that
+defeat every geometric test, real doors that read as refrigerators, compasses that
+lie precisely next to the appliances that define a kitchen. A system whose words a
+blind person will act on must therefore be engineered so that no single model's
+confidence is ever trusted alone, so that evidence must be repeated and localized
+before it is spoken, and so that a false positive is always treated as more
+expensive than a false negative --- a missed door costs a rescan; an invented one
+points a person at a wall. Equally, the voice channel is not presentation but
+interface: utterances that overlap, queue up, or contradict each other are
+functional defects, and the speech discipline that prevents them required as much
+engineering as the perception it narrates.
+
+The system's boundaries are stated honestly in Chapter~\ref{ch:limitations} ---
+no localization or door memory yet, direction hints that reach only the current
+fork, an evaluation with sighted testers --- and each maps onto the
+staged plan of Chapter~\ref{ch:future_work}, with deeper hint handling,
+exploration memory, and a formal blind-user study as the decisive
+next steps. What stands at the end of this project is a working demonstration
+that structured, task-scoped assistance --- respecting the cognitive load,
+autonomy, and safety of blind users --- can be delivered today, on hardware
+already in the user's pocket, and a tested foundation on which that assistance
+can now grow.

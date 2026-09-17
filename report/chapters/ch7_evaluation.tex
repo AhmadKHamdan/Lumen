@@ -4,26 +4,31 @@
 \chapter{Evaluation}
 \label{ch:evaluation}
 
-The evaluation combines three complementary methods, chosen to match what each part
+The evaluation combines four complementary methods, chosen to match what each part
 of the system actually claims. Trained models are evaluated with standard detection
-metrics on held-out data. Decision logic --- everything the user hears, and when ---
-is verified by automated behavioral tests that replay scripted scenarios
+metrics on held-out data. The voice front-end is evaluated offline against a
+constructed utterance corpus. Decision logic --- everything the user hears, and
+when --- is verified by automated behavioral tests that replay scripted scenarios
 deterministically. The full perception stack, which no offline metric can certify
-against real rooms, real lighting, and real hands, was evaluated through iterative
-live trials that directly shaped the design. We report each in turn, then system
-performance, and close with an honest account of limitations.
+against real rooms, real lighting, and real clutter, was evaluated through
+iterative live trials on phones that directly shaped the design. We report each in
+turn, then trace the outcome back to the requirements of
+Chapter~\ref{ch:system_design}, and close with the system's operational
+performance profile.
 
 \section{Door Detector Results}
 \label{sec:door_eval}
 
 The single-class door detector was evaluated on its 842-image held-out validation
 split (Section~\ref{sec:door_model}). Table~\ref{tab:door_results} reports the best
-checkpoint alongside shorter training runs, confirming the selected model.
+checkpoint alongside the shorter training runs that preceded it, confirming the
+selected model.
 
-\begin{table}[H]
+\begin{table}[!htbp]
 \centering
 \caption[Door detector validation results]{Door detector validation results (842 held-out images).}
 \label{tab:door_results}
+\small
 \begin{tabular}{lcccc}
 \toprule
 \textbf{Run} & \textbf{mAP@50} & \textbf{mAP@50--95} & \textbf{Precision} & \textbf{Recall} \\
@@ -39,169 +44,361 @@ Precision of $0.968$ --- very few false doors --- is the metric that matters mos
 for safety, and it is materially helped by the 827 hard-negative images (handles,
 cabinets) included in training. Recall of $0.892$ means roughly one door in ten is
 missed in a single frame; the system's temporal accumulation across the room scan
-makes the practical miss rate far lower, since a door need only be caught in three
-frames of an entire sweep. The mAP@50 of $0.946$ comfortably exceeds the
+makes the practical miss rate far lower. At the navigation loop's 3\,Hz, a slow
+full turn exposes the detector to on the order of a hundred frames per room, and a
+door needs only three sighting units across the entire sweep --- two frames if the
+verifier corroborates them --- to become a target. Under an independence
+approximation, even a per-frame recall well below the validation figure leaves the
+probability of missing a door that stays in view for a handful of frames
+vanishingly small; conversely, the same accumulation is why per-frame
+\emph{precision} is the number the design leans on, since false positives are the
+error the funnel exists to absorb. The mAP@50 of $0.946$ comfortably exceeds the
 ${\geq}0.6$ target set when the milestone was planned.
 
-\emph{An important caveat we report deliberately:} validation images come from the
-same public datasets as training, so these numbers measure generalization across
-images, not across domains. Live trials (Section~\ref{sec:live_trials}) exposed
-domain-shift failures --- most notably textured walls --- that the validation set
-cannot, which is precisely why the perception funnel exists.
+\emph{An important caveat we report deliberately:} the validation images come from
+the same public datasets as training, so these numbers measure generalization
+across images, not across domains. The live trials
+(Section~\ref{sec:live_trials}) exposed domain-shift failures --- most notably
+textured walls scoring as doors at high confidence --- that the validation set
+cannot, which is precisely why the perception funnel of
+Section~\ref{sec:door_funnel} exists: the deployed system never acts on the raw
+detector alone.
+
+\section{Offline Evaluation of the Command Parser}
+\label{sec:parser_eval}
+
+The command parser is the system's single point of entry --- every task begins
+with it --- so it was evaluated offline against a constructed corpus of
+\textbf{533 utterances}, run through the committed parser implementation. The
+corpus was built systematically rather than sampled, in six blocks: the exhaustive
+grid of every supported noun under every Object Allocation prefix
+($21\times16=336$); the exhaustive grid of every destination under every
+navigation prefix ($10\times10=100$); 25 noisy utterances combining
+transcription-style mishearings (``kichen'', ``botle'', ``labtop'',
+``refrigirator''), synonyms (``washroom'', ``lounge'', ``study'', ``sofa''),
+spacing errors (``bed room''), and trailing filler; the full completion vocabulary
+plus filler-wrapped variants (28); the full information-query vocabulary (24);
+and 20 out-of-scope utterances (``what time is it'', ``play some music'', ``set a
+timer'') that the parser must classify as \emph{unknown} rather than force into a
+task. An utterance counts as correct only if both the task type and the canonical
+target are exact. Table~\ref{tab:parser_eval} reports the results.
+
+\begin{table}[!htbp]
+\centering
+\caption[Command parser offline evaluation]{Command parser offline evaluation
+(533 utterances; correct = exact task type and canonical target).}
+\label{tab:parser_eval}
+\small
+\begin{tabular}{p{7.6cm} r r}
+\toprule
+\textbf{Block} & \textbf{Correct} & \textbf{Accuracy} \\
+\midrule
+Object commands, clean (all nouns $\times$ all prefixes) & 336/336 & 100.0\% \\
+Navigation commands, clean (all destinations $\times$ prefixes) & 100/100 & 100.0\% \\
+Mishearings, synonyms, and filler & 23/25 & 92.0\% \\
+Completion vocabulary (confirm / cancel) & 28/28 & 100.0\% \\
+Information queries (describe / repeat) & 24/24 & 100.0\% \\
+Out-of-scope rejection & 19/20 & 95.0\% \\
+\midrule
+\textbf{Overall} & \textbf{530/533} & \textbf{99.4\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The three failures are as informative as the successes. ``Find my cup, thanks''
+was classified as a \emph{completion} --- the trailing ``thanks'' is itself a
+confirm phrase, and the token-set matcher scores it above the completion
+threshold on a five-word utterance; the guard rails (short-utterance limit, high
+threshold) contain the pattern but do not eliminate it when a confirm word rides
+on a command. A self-correction (``I need my glasses, no wait, my cup'') exceeded
+the tolerable edit distance for any single split and fell to \emph{unknown} ---
+the safe failure, since the user is re-prompted rather than sent after the wrong
+object. Finally, one out-of-scope utterance (``read me the news'') was
+force-matched to a navigation command through the permissive prefix threshold ---
+the known cost of thresholds tuned to favor recall over precision at the task
+layer, where a wrong confirmation is immediately audible and correctable. The
+exhaustive clean grids passing in full confirm the property the test suite also
+asserts: every supported noun and destination is reachable through every
+template.
 
 \section{Automated Behavioral Verification}
 \label{sec:behavioral_eval}
 
-The 286-test suite (Section~\ref{sec:test_infrastructure}) functions as a
+The automated suite (Section~\ref{sec:test_infrastructure}) functions as a
 behavioral specification: each test asserts that a scripted situation produces the
-required action and utterance. Highlights relevant to the system's claims:
+required action and utterance. On the submitted revision the suite passes at
+\textbf{281/281}, completing in \textbf{0.7\,s} with no ML model loaded; the
+per-module composition is given in Table~\ref{tab:tests}. Highlights relevant to
+the system's claims:
 
 \begin{itemize}[nosep]
   \item \textbf{Complete navigation journeys.} A scripted two-room journey drives
-        the controller through a compass scan (36 simulated headings), door
-        selection from clustered bearings, the guided turn, the door call-out and
-        path-clear verdict, the at-door instruction, doorway transit (requiring
-        both door disappearance and sustained camera motion), the new room's scan,
-        indicator sighting, directed confirmation, and the arrival announcement
-        naming the observed evidence --- asserting the exact mode transitions and
-        key phrases at every step.
-  \item \textbf{Safety invariants.} Tests assert that a blocking obstacle overrides
-        door guidance; that transit can never fire without the movement gate; that
-        a lone sink never declares a kitchen while a refrigerator does; that
-        scattered detector noise cannot sum to an arrival (localization windows);
-        and that the room-cap check-in appears at exactly the configured cadence.
-  \item \textbf{Timing semantics.} Pacing is verified to be time-based rather than
-        frame-based: reprompts respect their configured seconds under varying tick
-        rates, and absence timers cannot be rushed by stalls.
+        the controller through a full compass scan (36 simulated headings), door
+        selection from clustered bearings, the guided turn to face it, the
+        one-shot door call-out followed by the path-clear verdict, the at-door
+        instruction, doorway transit --- asserted to require both door
+        disappearance and sustained camera motion --- the new room's scan
+        anchored to the new heading, indicator sighting, directed confirmation,
+        and the arrival announcement naming the observed evidence (``fridge''),
+        with the exact mode transitions and key phrases asserted at every step.
+  \item \textbf{Safety invariants.} Tests assert that a blocking obstacle
+        overrides door guidance with a priority warning; that an empty room
+        produces a rescan rather than a fabricated target; that a lone sink never
+        declares a kitchen while a refrigerator does (the primary/secondary
+        arrival rule, exercised across all six destination types); and that
+        arrival evidence must be localized --- scan-state resets between rooms
+        are verified so evidence can never leak across a doorway.
+  \item \textbf{FSM discipline.} All valid transitions, all rejections (e.g.,
+        \texttt{task\_complete} outside an active task), the no-op semantics of
+        unrecognized commands, subscriber notification exactly on real
+        transitions, and the abort path that returns to listening rather than
+        idle --- so a voice ``cancel'' never strands the user at a Start button
+        they cannot see.
   \item \textbf{Voice robustness.} The command parser is tested against 50+
-        realistic transcriptions, including mishearings (``cop''$\to$cup,
-        ``fone''$\to$phone), synonyms, filler words, and the completion/cancel
-        vocabulary used mid-task.
+        realistic transcriptions, including mishearings (``cop'' $\to$ cup,
+        ``fone'' $\to$ cell phone, ``microvave'' $\to$ microwave), synonyms
+        (``sofa'', ``fridge'', ``washroom''), trailing filler, punctuation and
+        case noise, multi-word targets (``dining table'', ``living room''), and
+        the completion, cancel, and information vocabularies used mid-task; a
+        closing pair of tests verifies that \emph{every} supported noun and
+        destination is reachable through at least one template.
+  \item \textbf{Reach guidance geometry.} The touch condition at box corners and
+        edges, the dominant-axis rule for diagonal offsets, the almost-zone
+        threshold, and defensive behavior on degenerate frames and off-frame
+        fingertips.
   \item \textbf{Isolation.} Concurrent sessions are verified to share no
-        navigation state.
+        navigation state, and re-entering a room-scan phase is verified to reset
+        exactly the per-room evidence.
 \end{itemize}
 
-The suite runs in under one second and passes at 286/286 on the submitted revision.
+Because the decision layer is pure, these are not smoke tests: they replay the
+same code paths the live system executes, with only the perception inputs faked at
+the same interfaces the engines use.
 
 \section{Live Trials}
 \label{sec:live_trials}
 
 The perception stack was evaluated the only way it can be: on phones, in real
-apartments, across furniture, lighting, and clutter. These trials were run
-continuously during development; their findings are the origin of nearly every
-mechanism in Chapter~\ref{ch:task_families}. We summarize the methodology and the
-principal findings.
+multi-room residential settings, across furniture, lighting, and clutter. These
+trials ran continuously throughout development, and their findings are the origin
+of nearly every mechanism in Chapter~\ref{ch:task_families}.
 
 \subsection{Methodology}
 
-Trials used sighted testers executing full task sessions on real phones over a
-tunnel to the development server, in multi-room residential settings. Each failure
-was diagnosed from logs (per-candidate perception traces) and addressed either by a
-threshold change or a structural mechanism, then re-tested. The navigation
-prototype completed full two-room journeys --- scan, door approach, obstacle
-interruption, doorway transit, second scan, semantic arrival --- end-to-end on a
-phone, repeatedly, before and after its integration into the final backend.
+Trials used sighted testers executing full task sessions on real phones over an
+HTTPS tunnel to the development server. The perception pipeline prints a
+per-candidate decision trace --- every door candidate's confidence, edge density,
+corroboration status, and keep/reject verdict, every distance estimate with its
+inputs, every obstacle-lane verdict --- so each failure could be diagnosed from
+logs, addressed by a threshold change or a structural mechanism, and re-tested in
+the same rooms. The navigation pipeline completed full two-room journeys --- scan,
+door approach, obstacle interruption, doorway transit, second scan, semantic
+arrival --- end-to-end on a phone, first as the standalone prototype and again
+after its integration into the final backend.
 
 \subsection{Principal Findings and the Mechanisms They Produced}
 
-\begin{table}[H]
+Tables~\ref{tab:failures_perception} and~\ref{tab:failures_guidance} summarize the
+representative failures observed live and the mechanism each one produced, split
+into perception failures and guidance/speech failures. This failure-driven record
+is itself an evaluation result: it documents which naive designs do \emph{not}
+survive contact with real rooms.
+
+\begin{table}[!htbp]
 \centering
-\caption[Representative live failures]{Representative live failures and the mechanisms they motivated.}
-\label{tab:failures}
-\begin{tabular}{p{5.6cm} p{8.2cm}}
+\caption[Live perception failures]{Representative live \emph{perception} failures
+and the mechanisms they motivated.}
+\label{tab:failures_perception}
+\small
+\begin{tabular}{p{5.8cm} p{7.4cm}}
 \toprule
 \textbf{Observed failure} & \textbf{Resulting mechanism} \\
 \midrule
 Blank wall detected as a door at 0.84--0.9 confidence, boxed edge-to-edge &
 Frame-fill gate ($\leq 0.80$ during scan); edge-density analysis of box interiors \\
-Plain door in dim light as smooth as a wall --- gate rejected real doors &
+Plain door in dim light as smooth as a wall --- edge gate rejected real doors &
 Edge density demotes to semantic verification instead of rejecting \\
 Lace curtain: edge-rich, tall, door-sized --- beat all geometric gates &
 Verifier corroboration required (door or handle seen) for weak candidates \\
 Real door at an angle read as ``refrigerator'' $\to$ false kitchen evidence &
 Fridge arbitration layer (verifier must confirm a refrigerator door) \\
-Scan ended early on compass noise; spoken directions computed from wrong anchor &
-Completion requires accumulated $350^\circ$ \emph{and} confirmed return to start \\
-Door filed by camera heading only --- announced left, was right &
-True bearing includes the door's in-frame horizontal offset \\
+Verifier's fridge veto on frames it also corroborated broke door streaks &
+Veto restricted to fridge evidence \emph{without} door evidence \\
+Whole-frame ``refrigerator'' on a blank wall $\to$ fake kitchen indicator &
+Whole-scene latch gate applied to COCO objects during scan and confirm \\
+Scattered single-frame detections summed to false arrivals &
+Localized evidence: sightings must concentrate in one $90^\circ$ window \\
 Distances ${\sim}33\%$ short on phones &
 Focal length derived from the image's long side (portrait streaming) \\
-``At the door'' fired from 2\,m on a single loose box mid-sidestep &
-Consecutive-frame arming streak; approach must have gotten near first \\
-``You're through'' stalled ${\sim}16$\,s by far doors of the \emph{next} room &
-Far glimpses do not reset the gone-counter; hold cap forces inference \\
-Announcement talked over the following instruction &
-Utterance merging; two-tier priority/ambient speech policy \\
-Side furniture grazing the lane edge triggered stop warnings &
-Minimum lane-overlap raised; lane narrowed to the walked corridor \\
+Loose far-range boxes read as ``near'' &
+Distance measured on the tighter of primary and verifier boxes \\
 Depth tripwire confused beside-path with in-path clutter &
 Floor segmentation replaced relative depth as the class-agnostic signal \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Two qualitative outcomes deserve mention. First, obstacle interruption behaves as
-designed in live runs: a chair placed in the walking lane mid-approach produced the
-warning, the sidestep advice, the all-clear, and re-orientation toward the door, in
-that order, without talking over itself. Second, semantic arrival is convincing in
-practice: entering a kitchen, the scan names the refrigerator and oven it confirmed
-and declares arrival --- and the localized-evidence rule visibly suppressed the
-false arrivals that scattered single-frame detections previously caused.
+\begin{table}[!htbp]
+\centering
+\caption[Live guidance and speech failures]{Representative live \emph{guidance and
+speech} failures and the mechanisms they motivated.}
+\label{tab:failures_guidance}
+\small
+\begin{tabular}{p{5.8cm} p{7.4cm}}
+\toprule
+\textbf{Observed failure} & \textbf{Resulting mechanism} \\
+\midrule
+Scan ended early on compass noise; directions computed from a wrong anchor &
+Completion requires accumulated $350^\circ$ \emph{and} confirmed return to start \\
+Door filed by camera heading only --- announced left, was right &
+True bearing includes the door's in-frame horizontal offset \\
+Door behind the user split into ``two doors behind you'' &
+Bearing clustering merges across the $\pm180^\circ$ seam \\
+``At the door'' fired from 2\,m on a single loose box mid-sidestep &
+Consecutive-frame arming streak; the approach must have gotten near first \\
+Door at arm's length is a smooth panel --- edge gate blocked the transit latch &
+Distance-independent ``door grew to fill the frame'' arming signal \\
+``You're through'' stalled ${\sim}16$\,s by far doors of the \emph{next} room &
+Far glimpses do not reset the gone-counter; a hold cap forces the inference \\
+Detection flicker alone spoke ``you're through'' while the user stood still &
+Movement gate: sustained camera motion is required for any transit \\
+Announcement talked over the following instruction &
+Utterance merging; two-tier priority/ambient speech policy \\
+Side furniture grazing the lane edge triggered stop warnings &
+Minimum lane-overlap raised; the judged lane narrowed to the walked corridor \\
+Normal handheld turning tripped the blur gate constantly &
+Motion threshold retuned; coaching only after three consecutive fast frames \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\subsection{End-to-End Task Metrics}
+\subsection{Qualitative Outcomes}
 
-For structured completion statistics, sessions were tallied per task family:
+Beyond the individual fixes, three end-to-end behaviors were established in live
+runs and are worth stating as results in their own right.
 
-\begin{itemize}[nosep]
-  \item Object Allocation + Reach Guidance: \tofill{N sessions, success rate,
-        median time-to-find; e.g.\ ``17/20 sessions completed, median 41\,s''}
-  \item Navigation (two-room journeys): \tofill{N journeys, arrivals without
-        intervention, arrivals total, median duration}
-  \item Obstacle watchdog (staged single-obstacle scenes): \tofill{detections/N,
-        false alerts/N, median warning latency}
-\end{itemize}
+\textbf{Multi-room journeys complete.} The full loop --- guided scan, door
+call-out, approach, doorway transit, fresh scan in the new room, semantic arrival
+on the kitchen's fridge and oven --- runs end-to-end on a phone, two rooms deep,
+producing the session transcript shown throughout
+Chapter~\ref{ch:task_families}. The doorway transit, identified in the design
+phase as the riskiest step, resolves reliably once gated on camera motion: the
+system waits at the door while the user stands still and announces the transit
+shortly after they actually walk.
+
+\textbf{Obstacle interruption behaves as specified.} A chair placed in the walking
+lane mid-approach produced the warning, the sidestep advice, the repeated prompt
+while still blocked, the all-clear, and re-orientation toward the door --- in that
+order, in merged utterances, without talking over itself. The floor-segmentation
+layer flagged unnamed clutter (boxes, a standing fan, clothes piles --- none of
+which COCO can name) when it lay in the walked corridor while staying silent about
+the same objects beside it, which is the distinction the earlier depth-based
+formulation failed to make.
+
+\textbf{Semantic arrival is convincing and resistant to noise.} Entering a
+kitchen, the scan names the refrigerator and oven it confirmed and declares
+arrival; the localized-evidence rule visibly suppressed the false arrivals that
+scattered single-frame detections previously caused, and the directed double-check
+means a journey never ends on scan evidence the user was not shown.
+
+The distance model deserves a specific note: after the portrait-axis correction
+and the tighter-box measurement, spoken step counts matched paced-out distances
+closely enough in trials that the one-shot calibration constant was left at its
+neutral value.
+
+\section{Evaluation Against Requirements}
+\label{sec:req_eval}
+
+Table~\ref{tab:req_eval} traces each requirement from
+Section~\ref{sec:requirements} to the mechanism that satisfies it and the evidence
+verifying it.
+
+\begin{table}[!htbp]
+\centering
+\caption[Requirements verification]{Requirements verification. AT = automated
+tests; OE = offline evaluation; LT = live trials.}
+\label{tab:req_eval}
+\small
+\begin{tabular}{p{1.2cm} p{6.4cm} p{5.4cm}}
+\toprule
+\textbf{Req.} & \textbf{Satisfied by} & \textbf{Verified by} \\
+\midrule
+FR1 & PTT pipeline; parser's task/completion/info vocabularies; UI Start/Stop fallback & AT (parser, FSM); OE (99.4\% on 533 utterances); LT \\
+FR2 & YOLOv8n + temporal filter + per-class spatial reasoning + guidance policy & AT (tracker end-to-end); LT \\
+FR3 & Reach phase: MediaPipe gating, fingertip geometry, auto-complete on touch & AT (reach geometry, once-only touch); LT \\
+FR4 & Exploration controller: scan, arrival rule, door funnel, transit & AT (scripted journeys); LT (two-room journeys) \\
+FR5 & Obstacle watchdog: named-object lane + floor segmentation, priority speech & AT (preemption invariant); LT (staged obstacles) \\
+FR6 & ``Describe'' scene readout; ``repeat'' replay of the last utterance & AT (info parsing, phrase rendering); OE; LT \\
+FR7 & Resume pool (5-minute TTL) + client session id + spoken resumption & LT (reconnect mid-task) \\
+\midrule
+NFR1 & Same-origin web frontend; tunnel HTTPS; auto-fetched weights & LT (fresh-phone deployments) \\
+NFR2 & 5\,FPS / 3\,FPS loops; inference in worker threads; latest-frame reads & LT (guidance tracks scene changes) \\
+NFR3 & Two-tier speech policy; utterance merging; sequential client playback & AT (merged phrases); LT \\
+NFR4 & Temporal filters; localized evidence; the three-layer door funnel & AT (invariants); LT (Tables~\ref{tab:failures_perception}--\ref{tab:failures_guidance}) \\
+NFR5 & Pure, injectable decision layer & AT: 281/281 in 0.7\,s, no models loaded \\
+NFR6 & 2--4\,m advisory phrasing; cane-complementary guidance language & Design review; LT protocol \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{System Performance}
 \label{sec:performance}
 
-On the reference configuration (\tofill{GPU model / CPU model, RAM}), measured
-figures: Object Allocation loop \tofill{X}\,FPS (target 5); navigation loop
-\tofill{X}\,FPS (target 3) with per-frame inference of \tofill{X}\,ms across the
-four navigation models; push-to-talk round trip (release to spoken confirmation)
-\tofill{X}\,s; guidance line latency (decision to audible speech, cache hit / miss)
-\tofill{X}\,/\,\tofill{X}\,s. The TTS cache and speech queue ensure the perception
-loops never block on synthesis; the frozen-feed guard was verified to halt evidence
-accumulation within 2\,s of a stalled camera.
+The system's responsiveness rests on a small number of measured and structural
+facts rather than on raw model speed.
 
-\section{Limitations}
-\label{sec:limitations}
+\textbf{Perception cadence and budget.} Object Allocation analyses frames at
+5\,FPS, giving each tick a 200\,ms budget: one YOLOv8n inference (a ${\sim}6$\,MB
+nano model at $640$ input, CPU real-time at this rate) plus, only in the reach
+phase, one MediaPipe hand inference measured at ${\sim}15$\,ms per frame during
+development --- which is precisely why the hand model is gated on the tracker's
+\emph{near} verdict rather than run continuously. Navigation runs at 3\,FPS, a
+333\,ms budget across up to four models per frame (YOLOv8m, the two door models,
+and SegFormer during walking), with two structural savings: the COCO model is
+class-filtered to the current goal's indicators (plus obstacle classes only while
+walking), and the verifier runs only when there is a door candidate or a fridge
+claim to check. All inference executes in worker threads, so the event loop ---
+and with it the WebSocket, the voice pipeline, and other sessions --- never blocks
+on a frame. Both loops read the \emph{latest} frame rather than a queue, so
+processing can never fall progressively behind the camera: under load the system
+skips frames, it does not lag. The motion gate adds a further saving during scans:
+blurred frames are skipped before any model runs, at the cost of a $64\times48$
+grayscale difference.
 
-We state limitations plainly; several are fundamental to the no-infrastructure
-design bet rather than implementation gaps.
+\textbf{Evidence timing.} The scan and confirmation constants translate into
+concrete user-facing latencies at 3\,Hz. A door needs three sighting units ---
+two verifier-corroborated frames, or three bare strong-confidence frames --- of
+the roughly one hundred a slow full turn provides, so a real door is virtually
+never missed by a completed scan, while a wall pattern must fool the funnel three
+separate times to become a target. An indicator needs four localized sightings to
+arm an arrival and three more during the directed re-check, plus a ${\sim}1$\,s
+settle window --- so a confirmed arrival costs the user roughly two seconds of
+steady pointing, while a scattered artifact can never accumulate the localized
+evidence at all. The obstacle watchdog's 3-blocked / 2-clear debounce means a
+warning follows a real blocker by ${\sim}1$\,s and an all-clear follows a sidestep
+by ${\sim}0.7$\,s --- fast enough to precede the user's next step at walking pace,
+slow enough that single-frame flicker never speaks.
 
-\begin{enumerate}[nosep]
-  \item \textbf{No localization.} Without SLAM or maps, deep multi-room journeys
-        rely on the room cap, the timeout, and the user's own coarse knowledge;
-        the system does not remember which doors it has already tried, so a
-        dead-end branch can be re-entered.
-  \item \textbf{Direction hints are not yet conversational.} When several doors
-        are visible, the system auto-selects (most-sighted, then straight-ahead)
-        rather than asking ``which way?'' and parsing the answer --- the designed
-        M3/M4 interaction remains future work.
-  \item \textbf{Domain shift can defeat the funnel.} In some rooms, textured walls
-        fool all three door models simultaneously; the gates contain the damage,
-        but the durable fix is a hard-negative fine-tune on exactly such footage.
-  \item \textbf{Advisory, not collision-avoidance.} Guidance is 2--4\,m advance
-        information at ${\sim}3$\,FPS; the white cane remains responsible for the
-        contact zone, and trials kept a sighted spotter present.
-  \item \textbf{Compass dependence.} The $360^\circ$ scan's bearings degrade with
-        magnetic interference --- ironically strongest near the appliances that
-        define a kitchen; the compass-less fallback loses bearing summaries.
-  \item \textbf{Online TTS dependence.} Speech synthesis requires connectivity;
-        the phrase cache and preload mitigate but do not remove this.
-  \item \textbf{Single language; curated vocabularies.} English only; six
-        destination room types; a curated object list.
-  \item \textbf{No blind-user study yet.} All trials used sighted testers;
-        conclusions about cognitive load and usability for the target population
-        require a formal user study (Chapter~\ref{ch:conclusion}).
-\end{enumerate}
+\textbf{Startup and first-use costs.} The heavyweight navigation models load once
+per server lifetime, in a worker thread, announced to the user (``Give me a
+moment\ldots'') rather than endured as silence, and are warmed on a blank frame so
+GPU initialization is not paid on the first real one. Every public model weight is
+fetched and cached automatically on first use (Table~\ref{tab:models}); the custom
+door weights ship in the repository, so a fresh clone reaches a working system
+with two commands (Section~\ref{sec:deployment}).
+
+\textbf{Speech latency.} Guidance phrases are templated, so the bounded 50-entry
+TTS cache converts the recurring lines --- confirmations, scan instructions,
+obstacle warnings --- into cache hits after first use, removing the synthesis
+network round trip from the steady state. Synthesis for cache misses runs in a
+worker thread; detection continues underneath it. On the client, the
+gesture-primed persistent audio element plays clips back-to-back with no per-clip
+setup, and the server-side ambient throttling (no ambient line within 2.5\,s of
+any line, no identical ambient line within 8\,s) guarantees the audio queue cannot
+build a backlog that lags behind reality --- the property that matters more to a
+blind user than any single clip's latency.
+
+\textbf{Verification cost.} The complete behavioral suite runs in 0.7\,s with no
+models loaded, which in practice meant it ran on every change --- the property
+that kept the pure decision layer correct while the perception layer was being
+reworked failure-by-failure.

@@ -44,7 +44,7 @@ Two phone recordings, straight from the browser session:
   <img src="docs/demo/stills/nav-at-the-door.jpg" width="19%" alt="Navigation: at the door, about to cross">
 </p>
 
-The spoken lines in the navigation video are exactly what the code says; [`tts_export/demo_script.md`](tts_export/demo_script.md) lists them in order and [`tts_export/make_demo_audio.py`](tts_export/make_demo_audio.py) regenerates the clips with the app's own gTTS voice. The final presentation is in [`docs/Lumen_Final_Presentation.pdf`](docs/Lumen_Final_Presentation.pdf).
+The spoken lines in the navigation video are exactly what the code says; [`tts_export/demo_script.md`](tts_export/demo_script.md) lists them in order and [`tts_export/make_demo_audio.py`](tts_export/make_demo_audio.py) regenerates the clips with the app's own gTTS voice. The final report is in [`docs/Lumen_Final_Report.pdf`](docs/Lumen_Final_Report.pdf) (LaTeX source under `report/`) and the final presentation in [`docs/Lumen_Final_Presentation.pdf`](docs/Lumen_Final_Presentation.pdf).
 
 ---
 
@@ -268,6 +268,7 @@ Lumen/
 ├── best.pt                        # custom single-class door detector (committed)
 ├── docs/
 │   ├── demo/                      # the two demo videos + stills used above
+│   ├── Lumen_Final_Report.pdf
 │   ├── Lumen_Final_Presentation.pdf
 │   ├── protocol.md                # frozen WS contract
 │   ├── Exploration_Navigation_Design.md    # navigation design + rationale

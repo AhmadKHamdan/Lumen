@@ -124,7 +124,7 @@ consistent, natural MP3 audio~\cite{googlecloudtts}. Two engineering measures ad
 cloud TTS service to real-time guidance: synthesized clips are cached in a bounded
 LRU keyed by exact text (guidance phrases repeat constantly), and synthesis runs in a
 background speech queue so that network latency never stalls perception
-(Section~\ref{sec:speech_pipeline}). Assistive TTS additionally demands
+(Section~\ref{sec:voice_pipeline}). Assistive TTS additionally demands
 \emph{discipline} over \emph{quantity}: Lumen enforces a two-tier speech policy in
 which priority announcements always play, while ambient nudges are dropped rather
 than queued whenever the audio pipe is busy.

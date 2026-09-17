@@ -1,0 +1,119 @@
+% =========================
+% Chapter 8
+% =========================
+\chapter{Limitations}
+\label{ch:limitations}
+
+We state the system's limitations plainly. Several are fundamental consequences of
+the no-infrastructure design bet --- guiding a blind user with nothing but a phone
+camera, a compass, and a server --- rather than implementation gaps; others are
+scope decisions with clear extension paths (Chapter~\ref{ch:future_work}).
+
+\section{Perception and Navigation}
+
+\begin{enumerate}[nosep]
+  \item \textbf{No localization.} Without SLAM, maps, or markers, the system has
+        no notion of where it is in a building. Each room is explored on local
+        evidence only, and the system does not remember which door it entered
+        through or which doors it has already tried --- so after a doorway
+        transit, the entry door will be re-found by the new room's scan, and a
+        journey through a goal-less branch can, in principle, ping-pong between
+        two rooms or re-enter a dead end. In practice the user's global ``stop''
+        and their own coarse sense of the space bound this, but the system itself
+        does not.
+  \item \textbf{Direction hints are shallow.} At a multi-door fork the system
+        asks, and a spoken ``left'' or ``right'' redirects the choice --- but the
+        hint applies to that fork only, in the current room, and is forgotten the
+        moment it is used. A hint that matches no confirmed door falls back to
+        the autonomous pick (nearest straight ahead), and nothing is remembered
+        across forks: the same doorway may be asked about again on a later pass,
+        and a hint cannot yet be embedded in the initial command (``the kitchen
+        is to the left''). Deeper hint handling and per-fork memory are staged in
+        Chapter~\ref{ch:future_work}.
+  \item \textbf{Domain shift can defeat the door models.} The door detector's
+        strong validation metrics (Section~\ref{sec:door_eval}) measure
+        generalization within its public training datasets. In some real rooms,
+        textured walls fooled all three models --- the primary detector, COCO,
+        and the verifier --- simultaneously. The perception funnel contains the
+        damage (such candidates rarely survive the gates, and never the sighting
+        minimums), but containment is not a cure; the durable fix is a
+        hard-negative fine-tune on exactly such footage.
+  \item \textbf{Advisory guidance, not collision avoidance.} Perception runs at
+        3--5\,FPS over a network hop; its value is advance information in the
+        2--4\,m band --- where the door is, what is in the path, which room this
+        is. The white cane remains responsible for the immediate contact zone,
+        and every trial kept a sighted spotter present. The obstacle watchdog is
+        additionally armed only during the door approach --- the phase in which
+        the system has instructed the user to walk --- not during scans or turns.
+  \item \textbf{Monocular distance is approximate.} Door distances assume a
+        2\,m door and a nominal field of view; non-standard doors, unusual
+        lenses, or digital zoom shift the step counts. The tighter-box
+        measurement, the median smoothing, and the tactile endgame (``reach out
+        with your hand'') are designed so that the final meter never depends on
+        the estimate being exact.
+  \item \textbf{Compass dependence.} The $360^\circ$ scan's bearings inherit the
+        magnetometer's weaknesses --- and magnetic interference is strongest
+        near exactly the large appliances that define a kitchen. Compass
+        glitches are filtered (large jumps ignored; completion requires the
+        confirmed return to start), and a compass-less fallback exists, but the
+        fallback loses bearing summaries and the guided turn.
+\end{enumerate}
+
+\section{System and Deployment}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Network and cloud dependence.} All perception and speech run
+        server-side: a session requires connectivity for camera streaming, and
+        speech synthesis requires reachability of the online TTS service. The
+        phrase cache absorbs repeated lines, and the resume mechanism recovers
+        the task after a drop, but a dead connection means a silent system ---
+        mitigated only by the client's local speech fallback announcing the
+        disconnection.
+  \item \textbf{Latency floors.} Every frame and every utterance crosses the
+        network. The architecture hides this well in the steady state (worker
+        threads, latest-frame reads, cached phrases), but the floor is real:
+        time-critical reactions --- a person stepping into the path at close
+        range --- are bounded by capture, transport, inference, synthesis, and
+        playback in sequence. This reinforces, rather than merely accompanies,
+        the cane-complementary scope.
+  \item \textbf{English only; curated vocabularies.} Voice interaction is
+        English; Object Allocation covers a curated set of COCO classes;
+        Navigation recognizes six destination room types. Rooms defined by
+        objects outside COCO --- hallways, staircases, garages --- cannot be
+        arrival targets at all, since the arrival rule needs indicator classes
+        the detector can produce.
+  \item \textbf{Perception logic is validated live, not by the automated
+        suite.} The pure decision layer is exhaustively tested, but the pixel
+        side of the door funnel --- edge densities, IoU corroboration against
+        real frames, the segmentation lane --- is validated only by the live
+        trials. A regression there would be caught by a person, not by the test
+        run.
+  \item \textbf{Demonstration-grade hardening.} Detection debug tracing is left
+        enabled by design (it is how live failures are diagnosed) and would be
+        disabled for production; captured push-to-talk audio is stored on the
+        server for debugging, which is a privacy consideration a deployment
+        would need to address; and the deployment story is a developer tunnel,
+        not a hardened multi-tenant host.
+\end{enumerate}
+
+\section{Evaluation Scope}
+
+\begin{enumerate}[nosep]
+  \item \textbf{No blind-user study.} All live trials used sighted testers.
+        The system's central claims about cognitive load, trust, and usability
+        are grounded in design principles from the assistive-technology
+        literature and in the trials' qualitative behavior --- but validating
+        them for the target population requires a formal study with blind and
+        low-vision participants, under an appropriate safety protocol. This is
+        the single most important item of future work.
+  \item \textbf{Demonstrated scope is small-scale.} Live journeys were two rooms
+        deep in residential settings with openable doors. Building-scale
+        environments --- long corridors, identical doors, elevators, glass ---
+        are outside the demonstrated envelope, and several (glass doors,
+        corridors with no indicator objects) are known hard cases for the
+        current perception vocabulary.
+  \item \textbf{Validation data overlaps the training distribution.} As noted in
+        Section~\ref{sec:door_eval}, the door detector's held-out split shares
+        its source datasets with training; cross-domain performance is
+        characterized only by the live trials.
+\end{enumerate}
