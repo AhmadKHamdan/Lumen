@@ -23,10 +23,10 @@ def _info(region, distance):
 
 # ---------- main guidance ----------
 
-def test_center_near_says_reach_forward():
+def test_center_near_invites_the_hand():
     phrase = gg.guidance_phrase("cup", _info("center", "near"))
     assert "right in front of you" in phrase.lower()
-    assert "reach forward" in phrase.lower()
+    assert "raise your hand" in phrase.lower()   # concrete cue, never "reach forward"
     assert "cup" in phrase
 
 
@@ -42,12 +42,11 @@ def test_direction_clause_present(region, clause):
 
 
 @pytest.mark.parametrize("distance, needle", [
-    ("near", "close by"),
+    ("near", "within arm's reach"),   # proximity hands off to hand guidance
     ("medium", "a few steps away"),
     ("far", "far away"),
 ])
 def test_distance_clause_present(distance, needle):
-    # Use a side region so "near" doesn't trigger the reach-forward special case.
     phrase = gg.guidance_phrase("book", _info("left", distance))
     assert needle in phrase.lower()
 

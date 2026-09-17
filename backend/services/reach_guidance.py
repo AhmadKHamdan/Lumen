@@ -118,7 +118,7 @@ def reach_phrase(target: str, info: ReachInfo) -> str:
     if info.state == "touching":
         return f"Your hand is on the {target}. Grasp it."
     if info.state == "almost":
-        return "Almost there. Reach forward."
+        return "Almost there. Push your hand straight forward."
     # Consistent "Move your hand X" wording across all four directions.
     if info.direction == "left":
         return "Move your hand to the left."
@@ -129,4 +129,4 @@ def reach_phrase(target: str, info: ReachInfo) -> str:
     if info.direction == "down":
         return "Move your hand down."
     # Defensive default.
-    return "Reach forward."
+    return "Move your hand straight forward."

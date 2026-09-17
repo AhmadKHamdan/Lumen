@@ -112,9 +112,9 @@ def test_phrase_per_direction(direction, needle):
     assert needle in reach_phrase("cup", info).lower()
 
 
-def test_phrase_almost_says_reach_forward():
+def test_phrase_almost_says_push_forward():
     info = ReachInfo(state="almost", direction="center", dx_frac=0.05, dy_frac=0.05)
-    assert "reach forward" in reach_phrase("cup", info).lower()
+    assert "straight forward" in reach_phrase("cup", info).lower()
 
 
 def test_phrase_touching_says_grasp_and_names_target():

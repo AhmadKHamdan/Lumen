@@ -113,10 +113,10 @@ perception loops, and speech synthesis. Serving the frontend from the same proce
         label={[font=\small\bfseries]above:FastAPI backend (single process)}] (server) {};
 
   % WS link
-  \draw[arr, <->] (client.east) -- node[lbl, above]{WebSocket /ws}
-        node[lbl, below]{JSON + tagged binary\\0x01 JPEG frame $\rightarrow$\\0x02 PTT audio $\rightarrow$\\$\leftarrow$ 0x03 TTS MP3} (server.west);
+  \draw[arr, <->] (client.east) -- node[lbl, above]{WebSocket}
+         (server.west);
 \end{tikzpicture}}
-\caption{System architecture: a sensing-only browser client and a single-process
+\caption[System architecture]{System architecture: a sensing-only browser client and a single-process
 backend joined by one WebSocket carrying JSON control messages and tagged binary
 media.}
 \label{fig:architecture}
@@ -154,12 +154,12 @@ its previous session id and the server re-fires the task with a spoken
 \begin{figure}[H]
 \centering
 \resizebox{0.98\textwidth}{!}{%
-\begin{tikzpicture}[node distance=9mm and 16mm]
+\begin{tikzpicture}[node distance=16mm and 34mm]
   \node[state] (idle) {Idle};
   \node[state, right=of idle] (listen) {Listening\\ForCommand};
   \node[state, above right=of listen] (obj) {ObjectAllocation\\Active};
   \node[state, below right=of listen] (nav) {Navigation\\Active};
-  \node[state, right=42mm of listen] (ret) {Returning\\ToIdle};
+  \node[state, right=72mm of listen] (ret) {Returning\\ToIdle};
 
   \draw[arr] (idle) -- node[lbl, above]{user\_start} (listen);
   \draw[arr] (listen) -- node[lbl, above left]{command\_recognized\\(find X)} (obj);
@@ -170,7 +170,7 @@ its previous session id and the server re-fires the task with a spoken
   \draw[arr] (nav.west) to[bend left=12] node[lbl, below]{task\_abort} (listen.south);
   \draw[arr] (ret.south) to[bend left=22] node[lbl, below]{cleanup\_done} (idle.south);
 \end{tikzpicture}}
-\caption{The session FSM. Every transition is driven by an explicit event; the only
+\caption[Session finite state machine]{The session FSM. Every transition is driven by an explicit event; the only
 autonomous transitions are \texttt{cleanup\_done} (one tick after entering
 ReturningToIdle) and \texttt{task\_complete} fired by a task engine on detected
 success (grasp, arrival).}

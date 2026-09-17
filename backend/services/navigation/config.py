@@ -158,7 +158,7 @@ NAV_TIMEOUT_SEC = 300.0  # whole-journey hard stop (engine enforces, speaks firs
 # -> that's what Phase B's depth model adds; this is the named-object safety layer.
 OBSTACLE_CLASSES = {"person", "chair", "couch", "bed", "dining table", "potted plant",
                     "backpack", "handbag", "suitcase", "bench", "tv", "dog", "cat"}
-OBST_NAMES = {"dining table": "table", "potted plant": "plant", "tv": "TV"}  # out loud
+OBST_NAMES = {"dining table": "table", "potted plant": "plant", "tv": "screen"}  # out loud
 CORRIDOR_X = (0.30, 0.70)  # central horizontal band = the lane the user walks into
 OBST_BOTTOM_FRAC = 0.62    # box bottom must reach below this (near the floor / close)
 OBST_MIN_H_FRAC = 0.18     # ignore tiny, far boxes

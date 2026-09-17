@@ -90,7 +90,7 @@ are COCO classes, so the stock detector produces them with no additional trainin
 
 \begin{table}[H]
 \centering
-\caption{Destination rooms and their indicator objects (all COCO classes). Arrival
+\caption[Destination rooms and indicator objects]{Destination rooms and their indicator objects (all COCO classes). Arrival
 requires ${\geq}1$ primary or ${\geq}2$ secondary indicators, temporally confirmed.}
 \label{tab:goal_indicators}
 \begin{tabular}{lll}
@@ -167,7 +167,7 @@ each layer motivated by a specific observed failure.
   \draw[arr] (sem) -- (arb);
   \draw[arr] (arb) -- (rel);
 \end{tikzpicture}}
-\caption{The door perception funnel. Each layer was added in response to a specific
+\caption[Door perception funnel]{The door perception funnel. Each layer was added in response to a specific
 live failure: whole-wall detections, dim plain doors indistinguishable from walls,
 a lace curtain that beat every geometric gate, and doors misread as refrigerators.}
 \label{fig:door_funnel}
@@ -228,7 +228,7 @@ timed steady pass with no bearing summaries.
   \draw[arr] (godoor.west) to[bend left=40] node[lbl, left]{doorway transit\\$\rightarrow$ new room} (disc.west);
   \draw[arr] (godoor) to[bend right=25] node[lbl, below]{door lost 12\,s\\$\rightarrow$ rescan} (disc.south east);
 \end{tikzpicture}}
-\caption{The navigation controller's internal state machine (nested inside the
+\caption[Navigation controller state machine]{The navigation controller's internal state machine (nested inside the
 session FSM's NavigationActive state). Priority is absolute: confirmed indicators
 always beat doors --- the system never walks the user out of the room they were
 looking for.}

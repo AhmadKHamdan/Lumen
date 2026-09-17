@@ -231,13 +231,86 @@ def test_reach_escalates_to_grab_after_hovering_almost():
     hand = _hand((280, 240))   # left of the box, 40 px from centroid -> almost
     r1 = tracker._update_reach(small, hand, 640, 480, 100.0)
     assert r1 is not None and r1[0] == "reach"
-    assert "reach forward" in r1[1].lower()
+    assert "forward" in r1[1].lower()
     # Unchanged cue within the re-affirm window -> quiet.
     assert tracker._update_reach(small, hand, 640, 480, 102.0) is None
     # Still 'almost' after the window -> grab prompt, not another repeat.
     r2 = tracker._update_reach(small, hand, 640, 480, 106.5)
     assert r2 is not None and r2[0] == "reach"
     assert "pick it up" in r2[1].lower()
+
+
+def test_hand_in_frame_suppresses_body_guidance():
+    """While the hand is visible, only hand-relative cues are spoken — never
+    'the cup is on your right' — even if the distance bucket jitters out of
+    'near' mid-reach."""
+    tracker = GuidanceTracker("cup")
+    _confirm(tracker)
+    res = tracker.update([CENTER_NEAR], SHAPE, 100.6, hand_pose=_hand((120, 240)))
+    assert res is not None and res[0] == "reach"
+    # Box shrinks (bucket jitters toward 'medium') but the hand is still in
+    # frame -> STILL reach mode; body-direction guidance must not leak in.
+    smaller = Detection("cup", 0.9, (250, 180, 390, 300))
+    res2 = tracker.update([smaller], SHAPE, 103.5, hand_pose=_hand((120, 240)))
+    assert res2 is None or res2[0] == "reach"
+
+
+def test_hand_leaving_frame_gives_one_hand_lost_cue():
+    """Hand out of frame past the grace window -> ONE explicit 'raise your hand
+    back up' cue; later, location guidance resumes on its normal cadence and
+    does NOT repeat the full hand invite (cooldown)."""
+    tracker = GuidanceTracker("cup")
+    _confirm(tracker)
+    res = tracker.update([CENTER_NEAR], SHAPE, 100.6, hand_pose=_hand((120, 240)))
+    assert res is not None and res[0] == "reach"
+    # Within the grace window: silent, not body guidance.
+    assert tracker.update([CENTER_NEAR], SHAPE, 101.0) is None
+    # Past the grace: a single, explicit hand-lost cue.
+    res2 = tracker.update([CENTER_NEAR], SHAPE, 100.6 + 3.2)
+    assert res2 is not None and res2[0] == "reach"
+    assert "hand" in res2[1].lower() and "lost" in res2[1].lower()
+    # Later (reaffirm elapsed): location guidance, invite suppressed by cooldown.
+    res3 = tracker.update([CENTER_NEAR], SHAPE, 113.5)
+    assert res3 is not None and res3[0] == "guide"
+    assert "front of you" in res3[1].lower()
+    assert "raise your hand" not in res3[1].lower()
+
+
+def test_target_lost_during_reach_stays_silent():
+    """Mid-reach the user's own hand occludes the target — YOLO losing it then
+    must NOT announce 'I lost sight of your bottle'."""
+    tracker = GuidanceTracker("cup")
+    _confirm(tracker)
+    res = tracker.update([CENTER_NEAR], SHAPE, 100.6, hand_pose=_hand((120, 240)))
+    assert res is not None and res[0] == "reach"
+    # Target vanishes (hand in the way) for the whole presence window.
+    t = 100.8
+    for _ in range(6):
+        assert tracker.update([], SHAPE, t, hand_pose=_hand((120, 240))) is None
+        t += 0.2
+
+
+def test_refound_soon_after_lost_is_short():
+    """Target re-acquired shortly after a spoken 'lost sight', same region ->
+    short re-acquisition line, not the full 'Found your...' + invite."""
+    tracker = GuidanceTracker("cup")
+    _confirm(tracker)
+    # Flush the window (no reach session, so the loss IS announced).
+    t = 100.6
+    lost = None
+    for _ in range(5):
+        r = tracker.update([], SHAPE, t)
+        if r is not None:
+            lost = r
+        t += 0.2
+    assert lost is not None and lost[0] == "lost"
+    # Re-confirm in the same region soon after -> short line, no invite.
+    for t2 in (t, t + 0.2, t + 0.4):
+        r = tracker.update([CENTER_NEAR], SHAPE, t2)
+    assert r is not None and r[0] == "guide"
+    assert "again" in r[1].lower()
+    assert "raise your hand" not in r[1].lower()
+    assert not r[1].lower().startswith("found")
 
 
 def test_touch_emits_touch_action_and_names_target():

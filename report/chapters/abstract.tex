@@ -8,9 +8,8 @@ Visual impairment affects hundreds of millions of individuals worldwide, and ind
 environments remain among the most difficult settings for independent mobility:
 satellite positioning is unavailable, layouts are unfamiliar, and traditional aids
 such as the white cane provide no information beyond arm's reach. Existing assistive
-vision systems tend to either narrate the scene continuously, overwhelming the user
-with a constant auditory stream, or answer isolated queries, forcing the user to know
-what to ask for in a space they cannot see. This work presents \textbf{Lumen}, a
+vision systems either narrate the scene continuously, overwhelming the user, or answer
+isolated queries, forcing the user to know what to ask for in a space they cannot see. This work presents \textbf{Lumen}, a
 task-oriented assistive system that occupies the middle ground: perception activates
 only in response to an explicit spoken task, provides structured guidance until the
 task completes, and then returns to silence.
@@ -29,18 +28,16 @@ object and guides the user toward it with direction and per-class distance cues.
 \emph{Reach Guidance} takes over at close range, steering the user's hand toward the
 target and completing the task automatically when the fingertip reaches it.
 \emph{Navigation} implements goal-directed exploration: the user names only a
-destination room, and Lumen guides them door-by-door --- a compass-anchored $360^\circ$
-room scan, semantic arrival detection from room-indicator objects, a three-layer door
-perception funnel built around a custom-trained door detector (mAP@50 $= 0.946$), a
-pinhole distance model that speaks in steps, doorway-transit detection, and an
+destination room, and Lumen guides them door-by-door using a compass-anchored
+$360^\circ$ room scan, a three-layer door-perception funnel built around a
+custom-trained door detector, a pinhole distance model that speaks in steps, and an
 obstacle watchdog that fuses named-object detection with class-agnostic floor
 segmentation while the user walks.
 
 The decision logic of all three tasks is isolated from models and I/O and is verified
 by an automated suite of 286 tests, including scripted multi-room navigation
-journeys. Live trials in real apartments drove the perception design
-failure-by-failure, from curtain and blank-wall rejection to compass-confirmed scan
-completion. Lumen demonstrates that structured, task-scoped assistance --- perception
+journeys, while live trials in real apartments drove the perception design
+failure-by-failure. Lumen demonstrates that structured, task-scoped assistance --- perception
 aligned with user intent --- can be delivered on commodity hardware while respecting
 the cognitive load, autonomy, and safety of blind users.
 
@@ -48,7 +45,9 @@ the cognitive load, autonomy, and safety of blind users.
 \cleardoublepage
 \selectlanguage{arabic}
 \chapter*{المستخلص}
+\selectlanguage{english}
 \addcontentsline{toc}{chapter}{Arabic Abstract}
+\selectlanguage{arabic}
 
 يؤثر ضعف البصر على مئات الملايين من الأشخاص حول العالم، وتبقى البيئات الداخلية من أصعب الأماكن للتنقل المستقل: فأنظمة تحديد المواقع غير متاحة داخل المباني، والمخططات غير مألوفة، والوسائل التقليدية مثل العصا البيضاء لا تقدم معلومات تتجاوز متناول الذراع. تميل أنظمة الرؤية المساعدة الحالية إما إلى وصف المشهد وصفاً متواصلاً يُغرق المستخدم بسيل سمعي دائم، أو إلى الإجابة عن استفسارات منفردة تُجبر المستخدم على معرفة ما يسأل عنه في مكان لا يستطيع رؤيته. يقدم هذا العمل نظام «لومن»، وهو نظام مساعد موجه بالمهام يحتل المنطقة الوسطى: إذ يُفعَّل الإدراك البصري فقط استجابةً لمهمة منطوقة صريحة، ويقدم إرشاداً منظماً حتى اكتمال المهمة، ثم يعود إلى الصمت.
 

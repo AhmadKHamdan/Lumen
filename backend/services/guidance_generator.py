@@ -43,12 +43,21 @@ def _distance_clause(distance: str) -> str:
     return "a few steps away"  # medium
 
 
-def guidance_phrase(target: str, info: "SpatialInfo") -> str:
+def _hand_invite(target: str) -> str:
+    """The proximity instruction: a CONCRETE action that starts hand guidance.
+    Never a vague "reach forward" — the user asked for an explicit cue to put
+    their hand where the camera can see it, so the reach guidance can begin."""
+    return ("Raise your hand up in front of the camera, and I'll guide "
+            f"your hand to the {target}.")
+
+
+def guidance_phrase(target: str, info: "SpatialInfo", invite: bool = True) -> str:
     """Compose the main guidance sentence for a confirmed detection.
 
     Examples
     --------
-    center + near  -> "Your cup is right in front of you. Reach forward."
+    center + near  -> "Your cup is right in front of you, within arm's reach.
+                       Raise your hand up in front of the camera, ..."
     left   + medium-> "Your cup is to your left, a few steps away."
     right  + far   -> "Your cup is to your right, but it's far away."
     """
@@ -56,9 +65,16 @@ def guidance_phrase(target: str, info: "SpatialInfo") -> str:
     region = getattr(info, "region", "center")
     distance = getattr(info, "distance", "medium")
 
-    # Special-case the "reachable" sweet spot: dead ahead and close.
-    if region == "center" and distance == "near":
-        return f"Your {target} is right in front of you. Reach forward."
+    # In proximity (any direction): say where it is, then invite the hand into
+    # the frame so reach guidance takes over. This is the handoff point from
+    # body navigation to hand navigation.
+    if distance == "near":
+        where = ("right in front of you" if region == "center"
+                 else _direction_clause(region))
+        base = f"Your {target} is {where}, within arm's reach."
+        # The caller (GuidanceTracker) rate-limits the invite: repeating the
+        # full instruction every re-affirm while nothing changed is chatter.
+        return base + (" " + _hand_invite(target) if invite else "")
 
     direction = _direction_clause(region)
     dist = _distance_clause(distance)
@@ -70,22 +86,32 @@ def guidance_phrase(target: str, info: "SpatialInfo") -> str:
         return f"Your {target} is {direction}, {dist}."
 
     # left / right
-    if distance == "near":
-        return f"Your {target} is {direction}, {dist}."
-    if distance == "far":
-        return f"Your {target} is {direction}, {dist}."
     return f"Your {target} is {direction}, {dist}."
 
 
-def first_seen_phrase(target: str, info: "SpatialInfo") -> str:
+def first_seen_phrase(target: str, info: "SpatialInfo", invite: bool = True) -> str:
     """Phrase used the first time the target is spotted - leads with 'Found'."""
     target = target or "object"
     region = getattr(info, "region", "center")
     distance = getattr(info, "distance", "medium")
-    if region == "center" and distance == "near":
-        return f"Found your {target}. It's right in front of you. Reach forward."
+    if distance == "near":
+        where = ("right in front of you" if region == "center"
+                 else _direction_clause(region))
+        base = f"Found your {target}. It's {where}, within arm's reach."
+        return base + (" " + _hand_invite(target) if invite else "")
     direction = _direction_clause(region)
     return f"Found your {target}, {direction}."
+
+
+def refound_phrase(target: str, info: "SpatialInfo") -> str:
+    """Short re-acquisition line: the target came back into view soon after a
+    'lost sight' announcement, in the same place. No 'Found your...' fanfare,
+    no hand invite — the user did nothing wrong and needs no new instruction."""
+    target = target or "object"
+    region = getattr(info, "region", "center")
+    where = ("right in front of you" if region == "center"
+             else _direction_clause(region))
+    return f"I see your {target} again, {where}."
 
 
 def scanning_phrase(target: str) -> str:
@@ -122,32 +148,58 @@ _DIRECTION_CLAUSE = {
     "center": "straight ahead",
 }
 
+# YOLO class names that read poorly out loud -> what the voice actually says.
+_SPOKEN_NAMES = {
+    "tv": "screen",
+    "dining table": "table",
+    "potted plant": "plant",
+}
+
 
 def describe_scene_phrase(detections, frame_shape) -> str:
     """Compose a spoken scene readout for the "describe" voice command.
 
     Takes up to the four highest-confidence YOLO detections, classifies each
-    into a region via spatial_reasoning, and joins them into a natural
-    sentence. Pure - no I/O, no model.
+    into a region via spatial_reasoning, and GROUPS objects that share a
+    direction so the clause is spoken once: "a keyboard and a TV straight
+    ahead", never "a keyboard straight ahead ... a TV straight ahead".
+    Pure - no I/O, no model.
     """
     # Local import so this module stays lightweight; spatial_reasoning is
     # itself pure and cheap.
+    from collections import Counter
     from services import spatial_reasoning
 
     if not detections:
         return "I don't see anything I recognise."
     h, w = int(frame_shape[0]), int(frame_shape[1])
     top = sorted(detections, key=lambda d: d.confidence, reverse=True)[:4]
-    parts: list[str] = []
+
+    by_region: dict[str, list[str]] = {}
     for det in top:
         info = spatial_reasoning.locate(det.box, w, h, label=det.label)
-        clause = _DIRECTION_CLAUSE.get(info.region, "in front of you")
-        parts.append(f"a {det.label} {clause}")
-    if len(parts) == 1:
-        return f"I see {parts[0]}."
-    if len(parts) == 2:
-        return f"I see {parts[0]}, and {parts[1]}."
-    return "I see " + ", ".join(parts[:-1]) + f", and {parts[-1]}."
+        by_region.setdefault(info.region, []).append(
+            _SPOKEN_NAMES.get(det.label, det.label))
+
+    def _join(items: list[str]) -> str:
+        if len(items) == 1:
+            return items[0]
+        if len(items) == 2:
+            return f"{items[0]} and {items[1]}"
+        return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+    parts: list[str] = []
+    # Stable spatial order: left -> ahead -> right (unknown regions last).
+    for region in ("left", "center", "right", *by_region.keys()):
+        labels = by_region.pop(region, None)
+        if not labels:
+            continue
+        counts = Counter(labels)
+        names = _join([f"a {lbl}" if n == 1 else f"{n} {lbl}s"
+                       for lbl, n in counts.items()])
+        clause = _DIRECTION_CLAUSE.get(region, "in front of you")
+        parts.append(f"{names} {clause}")
+    return "I see " + _join(parts) + "."
 
 
 def cancel_phrase(target: str) -> str:

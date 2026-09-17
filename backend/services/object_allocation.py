@@ -88,6 +88,22 @@ REACH_MIN_GAP_SEC = 2.5
 # MediaPipe momentarily fails to detect the hand between two good frames.
 REACH_GRACE_SEC = 3.0
 
+# The full "raise your hand up in front of the camera..." instruction is spoken
+# at most once per this window. Every state flicker (hand lost, target lost and
+# re-found) used to re-trigger the whole line while the camera hadn't moved —
+# demo feedback: "it keeps saying the same sentence very frequently".
+INVITE_COOLDOWN_SEC = 30.0
+
+# While a reach session is active or just ended, the user's own hand/arm sits
+# between the camera and the target — YOLO losing the target then is EXPECTED
+# occlusion, not news. Suppress "I lost sight of your bottle" in this window.
+REACH_OCCLUSION_SEC = 8.0
+
+# If the target comes back into view this soon after a spoken "lost sight" (in
+# the same region), re-announce with a short "I see it again" — never the full
+# "Found your bottle..." fanfare + invite.
+REFOUND_QUIET_SEC = 15.0
+
 # Frozen-feed guard (same rationale as the navigation engine's): if the phone
 # stops sending frames, re-analysing the stale image would keep re-confirming a
 # detection that may no longer be in front of the user. A stale frame is
@@ -139,6 +155,10 @@ class GuidanceTracker:
         # the 2D touch test can miss a real grab (depth), so we must not loop
         # "reach forward" forever.
         self._almost_cues = 0
+        # Chatter control (see INVITE_COOLDOWN_SEC / REFOUND_QUIET_SEC).
+        self.last_invite_at = float("-inf")   # last full hand-invite utterance
+        self._lost_at = float("-inf")         # last spoken "lost sight" moment
+        self._lost_region: Optional[str] = None
 
         # Spatial debouncing (Sprint 5 refinement). YOLO's box size flickers
         # frame-to-frame near bucket boundaries; we require SPATIAL_STREAK_TO_ACCEPT
@@ -160,9 +180,12 @@ class GuidanceTracker:
 
     def should_check_hand(self) -> bool:
         """Cheap pre-check for the detection loop: only worth running
-        MediaPipe when the target was most recently classified as 'near'.
-        Saves ~15 ms per frame in the common 'still looking' case."""
-        return self.last_distance == "near"
+        MediaPipe when the target was most recently classified as 'near',
+        OR while a reach session is already underway — once we're guiding
+        the hand, we must keep SEEING the hand even if the target's distance
+        bucket jitters out of 'near', or body-direction guidance leaks back
+        in mid-reach. Saves ~15 ms per frame in the 'still looking' case."""
+        return self.last_distance == "near" or self.last_reach_key is not None
 
     def update(
         self,
@@ -228,18 +251,34 @@ class GuidanceTracker:
             # Everything downstream uses the smoothed self.last_* values.
             effective_info = _replace_info(info, self.last_region, self.last_distance)
 
-            # Reach mode: target is near AND we can see the user's hand.
-            if self.last_distance == "near" and hand_pose is not None:
+            # Reach mode: the user's hand is IN FRAME — hand guidance owns the
+            # voice channel outright. While the hand is visible we never talk
+            # about where the target is relative to the BODY ("the bottle is
+            # on your right"); only hand-relative cues. The distance bucket
+            # deliberately doesn't gate this: once a hand is seen, box-size
+            # jitter out of 'near' must not let body guidance interrupt.
+            if hand_pose is not None:
                 return self._update_reach(best, hand_pose, w, h, now)
 
-            # Grace period: hand momentarily lost while we're still near?
-            # Stay silent for a few seconds rather than switching back to
-            # body-direction mode (which would then alternate with reach
-            # mode every ~200 ms on hand-detection flicker).
-            if (self.last_distance == "near" and hand_pose is None
+            # Hand just left the frame (or flickered out): a short grace stays
+            # silent rather than instantly switching back to body-direction
+            # mode, which used to alternate with reach mode every ~200 ms on
+            # hand-detection flicker. Past the grace, the hand is genuinely
+            # OUT of frame -> location guidance below resumes.
+            if (hand_pose is None
                     and self.last_reach_key is not None
                     and (now - self.last_reach_at) < REACH_GRACE_SEC):
                 return None
+
+            if hand_pose is None and self.last_reach_key is not None:
+                # Hand genuinely left the frame: close the reach session with
+                # ONE explicit cue to bring the hand back. Never re-speak the
+                # full location + invite line here — the target hasn't moved,
+                # and the repetition was pure confusion in the demo.
+                self.last_reach_key = None
+                self.last_reach_at = now  # extends the occlusion window too
+                return ("reach", "I lost sight of your hand. Raise your hand "
+                                 "back up in front of the camera.")
 
             # Otherwise: standard direction + distance guidance.
             key = (self.last_region, self.last_distance)
@@ -250,11 +289,24 @@ class GuidanceTracker:
                       or (now - self.last_spoken_at) >= MIN_SPEAK_GAP_SEC)
             if (key != self.last_spoken_key and gap_ok) or stale:
                 first = self.last_spoken_key is None
-                phrase = (
-                    guidance_generator.first_seen_phrase(self.target, effective_info)
-                    if first
-                    else guidance_generator.guidance_phrase(self.target, effective_info)
-                )
+                # Re-acquisition soon after a spoken "lost sight", same region:
+                # short line, no fanfare, no invite — nothing actually changed.
+                refound = (first and (now - self._lost_at) <= REFOUND_QUIET_SEC
+                           and self.last_region == self._lost_region)
+                # The full hand invite is rate-limited; between invites the
+                # near-phrases carry only the location ("within arm's reach").
+                invite = (self.last_distance == "near"
+                          and (now - self.last_invite_at) >= INVITE_COOLDOWN_SEC)
+                if refound:
+                    phrase = guidance_generator.refound_phrase(self.target, effective_info)
+                elif first:
+                    phrase = guidance_generator.first_seen_phrase(
+                        self.target, effective_info, invite=invite)
+                else:
+                    phrase = guidance_generator.guidance_phrase(
+                        self.target, effective_info, invite=invite)
+                if invite and not refound and self.last_distance == "near":
+                    self.last_invite_at = now
                 self.last_spoken_key = key
                 self.last_spoken_at = now
                 # Leaving reach mode -> forget the prior reach cue so re-entering
@@ -265,9 +317,17 @@ class GuidanceTracker:
 
         if self.ever_seen and hits == 0:
             # Was visible, now gone for the whole window -> announce once.
+            # EXCEPT during/right after a reach session: the user's own hand
+            # and arm sit between the camera and the target, so losing it is
+            # expected occlusion — "I lost sight of your bottle" while nobody
+            # moved reads as a malfunction.
+            if (now - self.last_reach_at) <= REACH_OCCLUSION_SEC:
+                return None
             if self.last_spoken_key is not None:
                 self.last_spoken_key = None
                 self.last_spoken_at = now
+                self._lost_at = now
+                self._lost_region = self.last_region
                 return ("lost", guidance_generator.lost_phrase(self.target, self.last_region))
             return None
 
