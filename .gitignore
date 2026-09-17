@@ -101,3 +101,9 @@ report/*.bcf
 report/*.blg
 report/*.run.xml
 report/preview-sandbox.pdf
+report/*.fdb_latexmk
+report/*.fls
+report/*.tmp
+
+# Scratch TTS output at the repo root
+/output.mp3

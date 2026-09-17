@@ -8,13 +8,13 @@
 [![MediaPipe](https://img.shields.io/badge/hands-MediaPipe-4285F4.svg)](https://developers.google.com/mediapipe)
 [![Whisper](https://img.shields.io/badge/STT-faster--whisper-7c3aed.svg)](https://github.com/SYSTRAN/faster-whisper)
 
-> Birzeit University - ENCS5200 Graduation Project - 2026.
+> Birzeit University - ENCS5300 Graduation Project - 2026.
 
 ---
 
 ## What is Lumen?
 
-A blind user opens a web page on their phone, points the camera at the room, and says **"find my cup."** Lumen answers in voice: *"Looking for your cup."* As they pan the camera, Lumen tracks the cup, calls out direction and distance ("to your left, a few steps away" -> "straight ahead, close by" -> "right in front of you, reach forward"), watches their other hand enter the frame, guides it ("move your hand to the right... almost there"), and announces grasp when the fingertip lands on the cup.
+A blind user opens a web page on their phone, points the camera at the room, and says **"find my cup."** Lumen answers in voice: *"Looking for your cup."* As they pan the camera, Lumen tracks the cup, calls out direction and distance ("to your left, a few steps away" -> "straight ahead, close by" -> "right in front of you, within arm's reach - raise your hand up in front of the camera"), watches their hand enter the frame, guides it ("move your hand to the right... almost there"), and announces grasp when the fingertip lands on the cup.
 
 No special hardware. No app install. Just a phone browser, a WebSocket, and a Python backend doing the vision and speech work.
 
@@ -30,11 +30,21 @@ No special hardware. No app install. Just a phone browser, a WebSocket, and a Py
 
 ## Demo
 
-> Screenshots and a demo video will go here once recorded.
->
-> ```
-> [ phone screenshot: search in progress ]   [ phone screenshot: reach guidance ]
-> ```
+Two phone recordings, straight from the browser session:
+
+| Video | What happens |
+| --- | --- |
+| [**Find & reach** (42 s)](docs/demo/lumen-find-and-reach.mp4) | "Find my bottle" → Lumen locates the bottle on the desk, calls out direction and distance, invites the hand into the frame, guides it ("move your hand to the right… almost there") and announces the grasp. |
+| [**Navigation** (1 min 34 s)](docs/demo/lumen-navigation.mp4) | "Take me to the kitchen" → guided 360° scan of the bedroom, door call-out with step count, a chair in the walking lane flagged by the obstacle watchdog, doorway transit, and arrival in the kitchen confirmed by the fridge. |
+
+<p align="center">
+  <img src="docs/demo/stills/find-bottle.jpg" width="19%" alt="Object Allocation: the bottle is detected on the desk">
+  <img src="docs/demo/stills/reach-guidance.jpg" width="19%" alt="Reach Guidance: the hand is guided onto the bottle">
+  <img src="docs/demo/stills/nav-door-and-chair.jpg" width="19%" alt="Navigation: door found, chair in the walking lane">
+  <img src="docs/demo/stills/nav-at-the-door.jpg" width="19%" alt="Navigation: at the door, about to cross">
+</p>
+
+The spoken lines in the navigation video are exactly what the code says; [`tts_export/demo_script.md`](tts_export/demo_script.md) lists them in order and [`tts_export/make_demo_audio.py`](tts_export/make_demo_audio.py) regenerates the clips with the app's own gTTS voice. The final presentation is in [`docs/Lumen_Final_Presentation.pdf`](docs/Lumen_Final_Presentation.pdf).
 
 ---
 
@@ -189,7 +199,7 @@ Edge cases handled:
 When Object Allocation has the target at `near` distance AND MediaPipe detects a hand in frame, the loop switches to hand-relative cues:
 
 - `approach` state with a named direction: "Move your hand to the right / left", "Raise your hand up", "Lower your hand."
-- `almost` state when the fingertip is within 10% of the frame from the target's centroid: "Almost there. Reach forward."
+- `almost` state when the fingertip is within 10% of the frame from the target's centroid: "Almost there. Push your hand straight forward."
 - `touching` state when the fingertip enters the target's bounding box: "Your hand is on the cup. Grasp it." This is the **only autonomous success-exit** in the system - it fires `task_complete` automatically. Every other path requires the user to say "got it."
 
 MediaPipe is only invoked when the tracker says we're in (or just left) reach distance - it stays idle the rest of the time, saving CPU.
@@ -242,7 +252,7 @@ Lumen/
 │   │       ├── models.py          # lazy YOLOv8m + door models + SegFormer
 │   │       ├── state.py           # per-session NavState
 │   │       └── config.py          # every tuning constant, in one place
-│   ├── tests/                     # 280+ pytest cases
+│   ├── tests/                     # 290+ pytest cases
 │   └── captured_audio/            # raw PTT WebM blobs for debugging (gitignored)
 ├── frontend/                      # Vanilla HTML + JS, no build step
 │   ├── index.html
@@ -257,10 +267,15 @@ Lumen/
 ├── door_training/                 # door-model dataset prep + trained verifier
 ├── best.pt                        # custom single-class door detector (committed)
 ├── docs/
+│   ├── demo/                      # the two demo videos + stills used above
+│   ├── Lumen_Final_Presentation.pdf
 │   ├── protocol.md                # frozen WS contract
 │   ├── Exploration_Navigation_Design.md    # navigation design + rationale
 │   ├── Door_Model_Training_Results.md      # door detector training report
 │   └── ...                        # sprint plan + intro PDFs
+├── report/                        # final report, LaTeX source (XeLaTeX + biber, see report/README.md)
+├── tts_export/                    # demo-video narration script + gTTS clips
+├── LICENSE
 └── README.md
 ```
 
@@ -275,7 +290,7 @@ cd backend
 python -m pytest tests/ -q
 ```
 
-280+ tests covering: FSM transitions, command parsing (50+ realistic transcriptions including mishearings and synonyms), spatial bucketing (per-class distance), guidance phrase rendering, reach-guidance state machine, hand-pose landmark conversion, YOLO detection parsing, the Object Allocation `GuidanceTracker` end-to-end with scripted frames and a fake clock, and the navigation exploration controller end-to-end (guided 360 scan → door choice → approach → doorway transit → next room → semantic arrival) plus its compass/bearing math and room-indicator arrival rules.
+290+ tests covering: FSM transitions, command parsing (50+ realistic transcriptions including mishearings and synonyms), spatial bucketing (per-class distance), guidance phrase rendering, reach-guidance state machine, hand-pose landmark conversion, YOLO detection parsing, the Object Allocation `GuidanceTracker` end-to-end with scripted frames and a fake clock, and the navigation exploration controller end-to-end (guided 360 scan → door choice → approach → doorway transit → next room → semantic arrival) plus its compass/bearing math and room-indicator arrival rules.
 
 The tests deliberately avoid loading the actual heavy ML models (YOLO weights, MediaPipe runtime) - they exercise the pure decision logic with mocks, so the suite runs in under a second.
 
@@ -307,7 +322,7 @@ Cloudflare Tunnel quick tunnels are the default recommendation in this README be
 - [x] Sprint 3 - Object Allocation with YOLOv8n.
 - [x] Sprint 4 - Navigation via goal-directed exploration (custom door model + room recognition + obstacle watchdog).
 - [x] Sprint 5 - Reach Guidance with MediaPipe Hands.
-- [ ] Sprint 6 - Blindfolded user trials, performance polish, final report.
+- [x] Sprint 6 - Demo-feedback rounds (chatter control, hand-invite handoff, grouped scene descriptions), demo videos, final presentation and report.
 
 See [`docs/Lumen_Implementation_Plan.pdf`](docs/Lumen_Implementation_Plan.pdf) for the full plan.
 
@@ -315,10 +330,10 @@ See [`docs/Lumen_Implementation_Plan.pdf`](docs/Lumen_Implementation_Plan.pdf) f
 
 ## Author
 
-**Ahmad Hamdan** - 1210241 - Birzeit University, ENCS5200.
+**Ahmad Hamdan** - Birzeit University, Electrical & Computer Engineering.
 
 Developed as a team graduation project at Birzeit University's Department of Electrical and Computer Engineering. Architecture, vision pipeline, and reach-guidance work by the author; the exploration-navigation pipeline (door model training, perception funnel, exploration controller) by team-mates, integrated into the backend architecture jointly.
 
 ## License
 
-Academic project - released under the MIT License. See `LICENSE` (to be added) if you want to build on it.
+Academic project - released under the [MIT License](LICENSE).
